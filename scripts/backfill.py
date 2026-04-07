@@ -35,7 +35,7 @@ def find_transcripts_dir() -> Path:
     # Try standard path
     claude_base = Path.home() / ".claude" / "projects"
 
-    cwd_slug = str(Path.cwd()).replace("/", "-").replace("\\", "-").lstrip("-")
+    cwd_slug = str(Path.cwd()).replace("/", "-").replace("\\", "-")
 
     for base in [ccs_base, claude_base]:
         candidate = base / cwd_slug
