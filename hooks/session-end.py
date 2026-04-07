@@ -41,11 +41,10 @@ MAX_CONTEXT_CHARS = 15_000
 MIN_TURNS_TO_FLUSH = 1
 
 
-def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
-    """Read JSONL transcript and extract last ~N conversation turns as markdown."""
+def extract_turns_from_jsonl(jsonl_path: Path) -> list[str]:
+    """Extract conversation turns from a single JSONL file."""
     turns: list[str] = []
-
-    with open(transcript_path, encoding="utf-8") as f:
+    with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -67,17 +66,42 @@ def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
                 continue
 
             if isinstance(content, list):
-                text_parts = []
+                parts = []
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif isinstance(block, str):
-                        text_parts.append(block)
-                content = "\n".join(text_parts)
+                    if not isinstance(block, dict):
+                        if isinstance(block, str):
+                            parts.append(block)
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        parts.append(block.get("text", ""))
+                    elif btype == "tool_use":
+                        name = block.get("name", "?")
+                        inp = block.get("input", {})
+                        inp_str = json.dumps(inp, ensure_ascii=False)[:200]
+                        parts.append(f"[Tool: {name}] {inp_str}")
+                    # skip tool_result and thinking blocks
+                content = "\n".join(p for p in parts if p.strip())
 
             if isinstance(content, str) and content.strip():
                 label = "User" if role == "user" else "Assistant"
                 turns.append(f"**{label}:** {content.strip()}\n")
+
+    return turns
+
+
+def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
+    """Read JSONL transcript and extract last ~N conversation turns as markdown."""
+    turns = extract_turns_from_jsonl(transcript_path)
+
+    # Also include subagent transcripts if present
+    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
+    if subagents_dir.exists():
+        for subagent_file in sorted(subagents_dir.glob("*.jsonl")):
+            sub_turns = extract_turns_from_jsonl(subagent_file)
+            if sub_turns:
+                turns.append(f"**[Subagent: {subagent_file.stem}]**\n")
+                turns.extend(sub_turns)
 
     recent = turns[-MAX_TURNS:]
     context = "\n".join(recent)
