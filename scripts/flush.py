@@ -82,33 +82,32 @@ async def run_flush(context: str) -> str:
         query,
     )
 
-    prompt = f"""Review the conversation context below and respond with a concise summary
-of important items that should be preserved in the daily log.
+    prompt = f"""Review the conversation context below and extract only what is worth preserving long-term.
 Do NOT use any tools — just return plain text.
+Do NOT reproduce raw conversation text or quotes from the conversation.
+Write in your own words, in a structured, encyclopedia-style format.
 
-Format your response as a structured daily log entry with these sections:
+Format your response as a structured daily log entry with ONLY the sections that have real content:
 
 **Context:** [One line about what the user was working on]
 
 **Key Exchanges:**
-- [Important Q&A or discussions]
+- [Summarize important discussions, decisions discovered, or answers — no raw quotes]
 
 **Decisions Made:**
-- [Any decisions with rationale]
+- [Technical or architectural decisions with their rationale]
 
 **Lessons Learned:**
-- [Gotchas, patterns, or insights discovered]
+- [Non-obvious gotchas, patterns, or insights worth remembering]
 
 **Action Items:**
-- [Follow-ups or TODOs mentioned]
+- [Explicit follow-ups or TODOs mentioned]
 
-Skip anything that is:
-- Routine tool calls or file reads
-- Content that's trivial or obvious
-- Trivial back-and-forth or clarification exchanges
-
-Only include sections that have actual content. If nothing is worth saving,
-respond with exactly: FLUSH_OK
+Rules:
+- Never reproduce raw user/assistant dialogue
+- Skip routine tool calls, file reads, trivial clarifications
+- Skip anything that's obvious from the code or already well-known
+- If the session has nothing worth preserving, respond with exactly: FLUSH_OK
 
 ## Conversation Context
 
@@ -227,10 +226,7 @@ def main():
 
     # Append to daily log
     if "FLUSH_OK" in response:
-        logging.info("Result: FLUSH_OK")
-        append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
-        )
+        logging.info("Result: FLUSH_OK (skipped)")
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
         append_to_daily_log(response, "Memory Flush")
