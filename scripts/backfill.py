@@ -29,23 +29,34 @@ MIN_TURNS_TO_FLUSH = 2
 
 
 def find_transcripts_dir() -> Path:
-    """Auto-detect the Claude Code transcripts directory for the current project."""
-    # Try CCS path first (newer Claude Code versions)
-    ccs_base = Path.home() / ".ccs" / "shared" / "context-groups" / "default" / "projects"
-    # Try standard path
-    claude_base = Path.home() / ".claude" / "projects"
+    """Auto-detect the Claude Code transcripts directory for the current project.
 
+    If both CCS and standard paths exist, picks the one with the most recent transcript.
+    """
     cwd_slug = str(Path.cwd()).replace("/", "-").replace("\\", "-")
 
-    for base in [ccs_base, claude_base]:
-        candidate = base / cwd_slug
-        if candidate.exists():
-            return candidate
+    candidates = [
+        Path.home() / ".ccs" / "shared" / "context-groups" / "default" / "projects" / cwd_slug,
+        Path.home() / ".claude" / "projects" / cwd_slug,
+    ]
 
-    raise FileNotFoundError(
-        f"Could not find transcripts directory. Pass --transcripts-dir explicitly.\n"
-        f"Tried:\n  {ccs_base / cwd_slug}\n  {claude_base / cwd_slug}"
-    )
+    existing = [p for p in candidates if p.exists()]
+
+    if not existing:
+        raise FileNotFoundError(
+            f"Could not find transcripts directory. Pass --transcripts-dir explicitly.\n"
+            + "\n".join(f"  {p}" for p in candidates)
+        )
+
+    if len(existing) == 1:
+        return existing[0]
+
+    # Both exist — pick the one with the most recently modified transcript
+    def latest_mtime(d: Path) -> float:
+        files = list(d.glob("*.jsonl"))
+        return max((f.stat().st_mtime for f in files), default=0.0)
+
+    return max(existing, key=latest_mtime)
 
 
 def extract_turns_from_jsonl(jsonl_path: Path) -> list[str]:
