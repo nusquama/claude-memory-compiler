@@ -32,7 +32,9 @@ def find_transcripts_dir() -> Path:
 
     If both CCS and standard paths exist, picks the one with the most recent transcript.
     """
-    cwd_slug = str(Path.cwd()).replace("/", "-").replace("\\", "-")
+    import os
+    project_root = os.environ.get("CLAUDE_PROJECT_DIR") or str(Path.cwd())
+    cwd_slug = project_root.replace("/", "-").replace("\\", "-")
 
     candidates = [
         Path.home() / ".ccs" / "shared" / "context-groups" / "default" / "projects" / cwd_slug,

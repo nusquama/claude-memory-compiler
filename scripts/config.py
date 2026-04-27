@@ -59,7 +59,15 @@ def resolve_project_dir() -> Path | None:
     project_name = toplevel.name
     if not project_name or project_name.startswith("."):
         return None
-    return VAULT_ROOT / project_name
+
+    # Opt-in: only consider this an active KB project if the folder exists in
+    # the vault. Users explicitly enable a project by running the cmc-init
+    # skill (which creates the folder structure). Without that, hooks skip
+    # silently — preventing accidental capture in random git repos.
+    candidate = VAULT_ROOT / project_name
+    if not candidate.is_dir():
+        return None
+    return candidate
 
 
 PROJECT_DIR = resolve_project_dir()
