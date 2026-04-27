@@ -106,9 +106,14 @@ else:
 # Cheap models for the right job. Override via env vars if needed.
 # Note: explicit model IDs bypass any global $ANTHROPIC_DEFAULT_*_MODEL
 # aliasing the user may have set in ~/.claude/settings.json.
-FLUSH_MODEL = os.environ.get("CMC_FLUSH_MODEL", "claude-haiku-4-7")
-COMPILE_MODEL = os.environ.get("CMC_COMPILE_MODEL", "claude-sonnet-4-7")
-QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-7")
+#
+# Defaults verified live against the Claude Agent SDK on 2026-04-27.
+# Latest available per tier: Haiku 4.5, Sonnet 4.6, Opus 4.7. Versions
+# are NOT synchronized across tiers — there is no Haiku 4.7 or 4.6, and
+# no Opus 4.6.
+FLUSH_MODEL = os.environ.get("CMC_FLUSH_MODEL", "claude-haiku-4-5")
+COMPILE_MODEL = os.environ.get("CMC_COMPILE_MODEL", "claude-sonnet-4-6")
+QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-6")
 
 
 # ── Timezone ──────────────────────────────────────────────────────────
