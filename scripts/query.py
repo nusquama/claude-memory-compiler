@@ -17,7 +17,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, PROJECT_DIR, QA_DIR, now_iso
+from config import KNOWLEDGE_DIR, PROJECT_DIR, QA_DIR, QUERY_MODEL, now_iso
 from utils import load_state, read_all_wiki_content, save_state
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -88,6 +88,7 @@ consulting the knowledge base below.
             prompt=prompt,
             options=ClaudeAgentOptions(
                 cwd=str(ROOT_DIR),
+                model=QUERY_MODEL,
                 system_prompt={"type": "preset", "preset": "claude_code"},
                 allowed_tools=tools,
                 permission_mode="acceptEdits",

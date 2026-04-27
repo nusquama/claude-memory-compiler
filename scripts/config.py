@@ -102,6 +102,15 @@ else:
     FLUSH_LOG = None
 
 
+# ── Model selection ───────────────────────────────────────────────────
+# Cheap models for the right job. Override via env vars if needed.
+# Note: explicit model IDs bypass any global $ANTHROPIC_DEFAULT_*_MODEL
+# aliasing the user may have set in ~/.claude/settings.json.
+FLUSH_MODEL = os.environ.get("CMC_FLUSH_MODEL", "claude-haiku-4-7")
+COMPILE_MODEL = os.environ.get("CMC_COMPILE_MODEL", "claude-sonnet-4-7")
+QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-7")
+
+
 # ── Timezone ──────────────────────────────────────────────────────────
 TIMEZONE = "Europe/Paris"
 

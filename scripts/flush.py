@@ -26,6 +26,7 @@ from pathlib import Path
 from config import (
     DAILY_DIR,
     FLUSH_LOG as LOG_FILE,
+    FLUSH_MODEL,
     FLUSH_STATE_FILE as STATE_FILE,
     PROJECT_DIR,
     SCRIPTS_DIR,
@@ -132,6 +133,7 @@ Rules:
             prompt=prompt,
             options=ClaudeAgentOptions(
                 cwd=str(ROOT),
+                model=FLUSH_MODEL,
                 allowed_tools=[],
                 max_turns=2,
             ),
