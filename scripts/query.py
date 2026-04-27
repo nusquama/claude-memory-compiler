@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, QA_DIR, now_iso
+from config import KNOWLEDGE_DIR, PROJECT_DIR, QA_DIR, now_iso
 from utils import load_state, read_all_wiki_content, save_state
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -112,6 +113,9 @@ consulting the knowledge base below.
 
 
 def main():
+    if PROJECT_DIR is None:
+        print("error: no project detected. Run from inside a git repo.", file=sys.stderr)
+        sys.exit(1)
     parser = argparse.ArgumentParser(description="Query the personal knowledge base")
     parser.add_argument("question", help="The question to ask")
     parser.add_argument(

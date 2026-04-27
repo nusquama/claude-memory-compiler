@@ -24,13 +24,26 @@ from pathlib import Path
 if os.environ.get("CLAUDE_INVOKED_BY"):
     sys.exit(0)
 
-ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
-SCRIPTS_DIR = ROOT / "scripts"
-STATE_DIR = SCRIPTS_DIR
+# Make scripts/ importable when this hook is invoked from anywhere.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from config import (  # noqa: E402
+    DAILY_DIR,
+    FLUSH_LOG,
+    PROJECT_DIR,
+    SCRIPTS_DIR,
+    STATE_DIR,
+    TOOL_DIR as ROOT,
+)
+
+# No project (e.g. session opened outside any git repo) → exit silently.
+if PROJECT_DIR is None:
+    sys.exit(0)
+
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    filename=str(SCRIPTS_DIR / "flush.log"),
+    filename=str(FLUSH_LOG),
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [hook] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",

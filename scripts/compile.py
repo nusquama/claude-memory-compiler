@@ -18,7 +18,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from config import AGENTS_FILE, CONCEPTS_DIR, CONNECTIONS_DIR, DAILY_DIR, KNOWLEDGE_DIR, now_iso
+from config import AGENTS_FILE, CONCEPTS_DIR, CONNECTIONS_DIR, DAILY_DIR, KNOWLEDGE_DIR, PROJECT_DIR, now_iso
 from utils import (
     file_hash,
     list_raw_files,
@@ -164,6 +164,9 @@ Read the daily log above and compile it into wiki articles following the schema 
 
 
 def main():
+    if PROJECT_DIR is None:
+        print("error: no project detected. Run from inside a git repo.", file=sys.stderr)
+        sys.exit(1)
     parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
     parser.add_argument("--file", type=str, help="Compile a specific daily log file")

@@ -20,8 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = ROOT / "scripts"
+from config import PROJECT_DIR, SCRIPTS_DIR, TOOL_DIR as ROOT
 
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
@@ -133,6 +132,9 @@ def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
 
 
 def main():
+    if PROJECT_DIR is None:
+        print("error: no project detected. Run from inside a git repo.", file=sys.stderr)
+        sys.exit(1)
     dry_run = "--dry-run" in sys.argv
 
     # Allow explicit --transcripts-dir override

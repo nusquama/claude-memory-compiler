@@ -23,11 +23,23 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
-SCRIPTS_DIR = ROOT / "scripts"
-STATE_FILE = SCRIPTS_DIR / "last-flush.json"
-LOG_FILE = SCRIPTS_DIR / "flush.log"
+from config import (
+    DAILY_DIR,
+    FLUSH_LOG as LOG_FILE,
+    FLUSH_STATE_FILE as STATE_FILE,
+    PROJECT_DIR,
+    SCRIPTS_DIR,
+    STATE_DIR,
+    TOOL_DIR as ROOT,
+)
+
+# No project detected → nothing to flush. Exit silently before any I/O.
+if PROJECT_DIR is None:
+    sys.exit(0)
+
+PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+DAILY_DIR.mkdir(parents=True, exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Set up file-based logging so we can verify the background process ran.
 # The parent process sends stdout/stderr to DEVNULL (to avoid the inherited
@@ -151,7 +163,7 @@ def maybe_trigger_compilation() -> None:
 
     # Check if today's log has already been compiled
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
-    compile_state_file = SCRIPTS_DIR / "state.json"
+    from config import STATE_FILE as compile_state_file
     if compile_state_file.exists():
         try:
             compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
@@ -182,7 +194,7 @@ def maybe_trigger_compilation() -> None:
         kwargs["start_new_session"] = True
 
     try:
-        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
+        log_handle = open(str(STATE_DIR / "compile.log"), "a")
         _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
     except Exception as e:
         logging.error("Failed to spawn compile.py: %s", e)

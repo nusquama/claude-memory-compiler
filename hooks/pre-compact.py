@@ -24,12 +24,23 @@ from pathlib import Path
 if os.environ.get("CLAUDE_INVOKED_BY"):
     sys.exit(0)
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = ROOT / "scripts"
-STATE_DIR = SCRIPTS_DIR
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from config import (  # noqa: E402
+    FLUSH_LOG,
+    PROJECT_DIR,
+    SCRIPTS_DIR,
+    STATE_DIR,
+    TOOL_DIR as ROOT,
+)
+
+if PROJECT_DIR is None:
+    sys.exit(0)
+
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    filename=str(SCRIPTS_DIR / "flush.log"),
+    filename=str(FLUSH_LOG),
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [pre-compact] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",

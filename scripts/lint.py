@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
+from config import KNOWLEDGE_DIR, PROJECT_DIR, REPORTS_DIR, now_iso, today_iso
 from utils import (
     count_inbound_links,
     extract_wikilinks,
@@ -248,6 +249,9 @@ def generate_report(all_issues: list[dict]) -> str:
 
 
 def main():
+    if PROJECT_DIR is None:
+        print("error: no project detected. Run from inside a git repo.", file=sys.stderr)
+        sys.exit(1)
     parser = argparse.ArgumentParser(description="Lint the knowledge base")
     parser.add_argument(
         "--structural-only",

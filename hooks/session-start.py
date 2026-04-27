@@ -21,11 +21,25 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Paths relative to project root
-ROOT = Path(__file__).resolve().parent.parent
-KNOWLEDGE_DIR = ROOT / "knowledge"
-DAILY_DIR = ROOT / "daily"
-INDEX_FILE = KNOWLEDGE_DIR / "index.md"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from config import (  # noqa: E402
+    DAILY_DIR,
+    INDEX_FILE,
+    KNOWLEDGE_DIR,
+    PROJECT_DIR,
+    TOOL_DIR as ROOT,
+)
+
+# No project context → emit empty additionalContext and exit (neutral behavior).
+if PROJECT_DIR is None:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "",
+        }
+    }))
+    sys.exit(0)
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
