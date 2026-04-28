@@ -116,6 +116,19 @@ COMPILE_MODEL = os.environ.get("CMC_COMPILE_MODEL", "claude-sonnet-4-6")
 QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-6")
 
 
+# ── Conversation extraction limits ────────────────────────────────────
+# Bounds on how much of a session transcript flush.py sees.
+# Defaults: capture effectively the entire session for any normal coding
+# workload. Haiku 4.5 has a 200K-token context window (~600K chars), so
+# 150K chars + prompt + output fits comfortably with margin.
+#
+# If you find Haiku context-overflowing on very long sessions, lower
+# CMC_FLUSH_MAX_CHARS — the truncation keeps the LAST N chars (where
+# conclusions live).
+FLUSH_MAX_TURNS = int(os.environ.get("CMC_FLUSH_MAX_TURNS", "1000"))
+FLUSH_MAX_CHARS = int(os.environ.get("CMC_FLUSH_MAX_CHARS", "150000"))
+
+
 # ── Timezone ──────────────────────────────────────────────────────────
 TIMEZONE = "Europe/Paris"
 

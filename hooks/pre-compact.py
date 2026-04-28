@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from config import (  # noqa: E402
     FLUSH_LOG,
+    FLUSH_MAX_CHARS,
+    FLUSH_MAX_TURNS,
     PROJECT_DIR,
     SCRIPTS_DIR,
     STATE_DIR,
@@ -46,8 +48,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-MAX_TURNS = 30
-MAX_CONTEXT_CHARS = 15_000
+MAX_TURNS = FLUSH_MAX_TURNS
+MAX_CONTEXT_CHARS = FLUSH_MAX_CHARS
 MIN_TURNS_TO_FLUSH = 5
 
 
