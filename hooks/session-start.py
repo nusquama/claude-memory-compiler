@@ -17,6 +17,9 @@ Configure in .claude/settings.json:
 """
 
 import json
+import os
+import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,8 +31,67 @@ from config import (  # noqa: E402
     INDEX_FILE,
     KNOWLEDGE_DIR,
     PROJECT_DIR,
+    SCRIPTS_DIR,
     TOOL_DIR as ROOT,
 )
+
+
+def maybe_extract_native_summaries() -> None:
+    """Safety net — re-run native summary extraction at session start.
+
+    Catches any compact summaries that PreCompact missed because they
+    were written to the JSONL after the hook fired. The extract script
+    is idempotent (UUID-tracked), so this is a no-op when nothing's new.
+    """
+    if os.environ.get("CLAUDE_INVOKED_BY"):
+        return  # recursion guard
+
+    raw = ""
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    except (ValueError, OSError):
+        return
+    if not raw:
+        return
+
+    try:
+        hook_input = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            fixed = re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw)
+            hook_input = json.loads(fixed)
+        except json.JSONDecodeError:
+            return
+
+    transcript_path_str = hook_input.get("transcript_path", "")
+    session_id = hook_input.get("session_id", "unknown")
+    if not transcript_path_str or not Path(transcript_path_str).exists():
+        return
+
+    extract_script = SCRIPTS_DIR / "extract_native_summaries.py"
+    if not extract_script.exists():
+        return
+
+    cmd = [
+        "uv",
+        "run",
+        "--directory",
+        str(ROOT),
+        "python",
+        str(extract_script),
+        transcript_path_str,
+        session_id,
+    ]
+    try:
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+        )
+    except Exception:
+        pass  # never block SessionStart on this side-task
 
 # No project context → emit empty additionalContext and exit (neutral behavior).
 if PROJECT_DIR is None:
@@ -90,6 +152,14 @@ def build_context() -> str:
 
 
 def main():
+    # Safety net: catch any native compact summaries the PreCompact hook
+    # missed (the summary often lands in the JSONL AFTER PreCompact runs).
+    # This consumes stdin, so it must run before anything else that needs it.
+    try:
+        maybe_extract_native_summaries()
+    except Exception:
+        pass
+
     context = build_context()
 
     output = {

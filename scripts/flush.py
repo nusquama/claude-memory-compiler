@@ -85,8 +85,95 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
         f.write(entry)
 
 
-async def run_flush(context: str) -> str:
-    """Use Claude Agent SDK to extract important knowledge from conversation context."""
+def detect_failure_cause(stderr_lines: list[str], exc_message: str) -> str:
+    """Best-effort one-line label for why the bundled CLI failed."""
+    text = (" ".join(stderr_lines) + " " + exc_message).lower()
+    if "401" in text or "invalid x-api-key" in text or "authentication_error" in text:
+        return "authentication failed (likely v2.1.92 intermittent 401 bug)"
+    if "429" in text or "rate limit" in text or "rate_limit" in text:
+        return "rate limited"
+    if "shell is already running" in text:
+        return "concurrent CLI invocation"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "not a valid model" in text or "invalid model" in text:
+        return "invalid model name"
+    return "see flush.log for details"
+
+
+def append_error_marker_to_daily(session_id: str, cause: str) -> None:
+    """Write a brief, lisible error marker to today's daily log.
+
+    Replaces the previous behaviour of dumping the full FLUSH_ERROR string
+    (with traceback) into the daily log. The detail still lives in
+    flush.log; the daily log just gets a one-paragraph signal so the
+    failure stays visible without polluting the knowledge base.
+    """
+    today = datetime.now(timezone.utc).astimezone()
+    log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
+
+    if not log_path.exists():
+        DAILY_DIR.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
+            encoding="utf-8",
+        )
+
+    time_str = today.strftime("%H:%M")
+    short_id = (session_id or "unknown")[:8]
+    entry = (
+        f"### [ERROR] Memory Flush Failed ({time_str})\n\n"
+        f"Session `{short_id}`: {cause}\n\n"
+        f"Full details: `{LOG_FILE}`\n\n"
+    )
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+RETRY_DELAYS = (5, 15, 45)  # seconds before retries 2, 3, 4
+
+# Knobs (overridable via env). Backfill sets MAX_RETRIES=1 to avoid
+# multiplying the per-session wait; SessionEnd hooks keep the default.
+MAX_ATTEMPTS = max(1, int(os.environ.get("CMC_FLUSH_MAX_RETRIES", "3")))
+ATTEMPT_TIMEOUT = max(30, int(os.environ.get("CMC_FLUSH_ATTEMPT_TIMEOUT", "180")))
+
+
+def _is_transient_error(exc: Exception, stderr_text: str) -> bool:
+    """Decide if a query() failure is worth retrying.
+
+    Transient: auth races (401), rate limits (429), concurrent CLI lockfile
+    collisions, generic "exit code 1" with no further detail.
+    Non-transient: model validation errors, malformed prompts, etc.
+    """
+    msg = str(exc).lower()
+    text = stderr_text.lower()
+    # Hard non-transient signals — don't waste time retrying
+    if "not a valid model" in text or "invalid model" in text:
+        return False
+    if "invalid api key" in text or "authentication is currently not supported" in text:
+        return False
+    # Transient signals
+    if "401" in text or "auth" in text:
+        return True
+    if "429" in text or "rate limit" in text:
+        return True
+    if "shell is already running" in text:
+        return True
+    # Default: retry generic "exit code 1" failures (most common)
+    if "exit code 1" in msg or "command failed" in msg:
+        return True
+    return False
+
+
+async def run_flush(context: str) -> tuple[str, list[str]]:
+    """Use Claude Agent SDK to extract important knowledge from conversation context.
+
+    Returns (response_text, captured_stderr_lines). On success the response
+    is the LLM output; on failure it's a "FLUSH_ERROR: ..." marker. The
+    captured stderr from the bundled CLI is returned so callers can detect
+    the failure cause (auth/rate/concurrency/etc.).
+    """
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -126,30 +213,78 @@ Rules:
 
 {context}"""
 
+    captured_stderr: list[str] = []
+
+    def stderr_callback(line: str) -> None:
+        # Per-line callback fired by the SDK transport (subprocess_cli.py).
+        # Without this, stderr from the bundled CLI is irretrievable —
+        # the SDK hardcodes "Check stderr output for details" as the
+        # exception's stderr field (anthropics/claude-agent-sdk-python#800).
+        text = line.rstrip()
+        if text:
+            captured_stderr.append(text)
+            logging.warning("[bundled CLI] %s", text)
+
+    last_exc: Exception | None = None
     response = ""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            delay = RETRY_DELAYS[min(attempt - 2, len(RETRY_DELAYS) - 1)]
+            logging.info("Retry attempt %d/%d after %ds", attempt, MAX_ATTEMPTS, delay)
+            await asyncio.sleep(delay)
 
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT),
-                model=FLUSH_MODEL,
-                allowed_tools=[],
-                max_turns=2,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response += block.text
-            elif isinstance(message, ResultMessage):
-                pass
-    except Exception as e:
-        import traceback
-        logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
-        response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
+        attempt_stderr_start = len(captured_stderr)
+        response = ""
 
-    return response
+        async def _run_query() -> str:
+            local = ""
+            async for message in query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    cwd=str(ROOT),
+                    model=FLUSH_MODEL,
+                    allowed_tools=[],
+                    max_turns=2,
+                    stderr=stderr_callback,
+                ),
+            ):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            local += block.text
+                elif isinstance(message, ResultMessage):
+                    pass
+            return local
+
+        try:
+            response = await asyncio.wait_for(_run_query(), timeout=ATTEMPT_TIMEOUT)
+            return response, captured_stderr
+        except asyncio.TimeoutError:
+            last_exc = TimeoutError(f"bundled CLI hung for >{ATTEMPT_TIMEOUT}s — killed")
+            logging.warning(
+                "Attempt %d/%d timed out after %ds (bundled CLI hung)",
+                attempt, MAX_ATTEMPTS, ATTEMPT_TIMEOUT,
+            )
+            # Timeouts are always transient — keep retrying within MAX_ATTEMPTS
+            continue
+        except Exception as e:
+            last_exc = e
+            this_attempt_stderr = "\n".join(captured_stderr[attempt_stderr_start:])
+            logging.warning(
+                "Attempt %d/%d failed: %s",
+                attempt, MAX_ATTEMPTS, e,
+            )
+            if not _is_transient_error(e, this_attempt_stderr):
+                logging.info("Error is non-transient — skipping further retries")
+                break
+
+    import traceback
+    logging.error(
+        "Agent SDK error after %d attempts: %s\n%s",
+        attempt, last_exc, traceback.format_exc(),
+    )
+    response = f"FLUSH_ERROR: {type(last_exc).__name__}: {last_exc}"
+    return response, captured_stderr
 
 
 COMPILE_AFTER_HOUR = 18  # 6 PM local time
@@ -202,6 +337,67 @@ def maybe_trigger_compilation() -> None:
         logging.error("Failed to spawn compile.py: %s", e)
 
 
+# Concurrency lock: prevents two flush.py instances racing for the bundled
+# Claude CLI. Both SessionEnd hooks firing across multiple projects and
+# /cmc-scan running while a Claude Code session is active can lead to
+# concurrent invocations of the bundled CLI. The CLI v2.1.92 has an open
+# auth race bug (anthropics/claude-code#44100) that surfaces as `exit code
+# 1, Check stderr output for details`. The lock is VAULT-WIDE (lives in
+# _config/.state/, not in per-project .state/) so that flushes from
+# different projects also serialise.
+LOCK_FILE = ROOT / ".state" / "flush.lock"
+LOCK_STALE_SECONDS = 600  # 10 min — beyond any realistic flush duration
+LOCK_WAIT_TIMEOUT = 90    # max seconds to wait for another flush to finish
+LOCK_POLL_INTERVAL = 2    # check every 2s
+
+
+def acquire_flush_lock() -> bool:
+    """Acquire an exclusive flush lock for the whole vault.
+
+    Waits up to LOCK_WAIT_TIMEOUT seconds for another flush to finish
+    before giving up. Returns True if the lock was acquired, False if
+    another flush.py is still holding it after the wait window.
+
+    Caller can bypass the lock by setting CMC_FLUSH_SKIP_LOCK=1 — used
+    by backfill.py's --parallel mode where the caller manages the
+    concurrency budget itself.
+    """
+    if os.environ.get("CMC_FLUSH_SKIP_LOCK") == "1":
+        return True
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    waited = 0
+    while LOCK_FILE.exists():
+        try:
+            age = time.time() - LOCK_FILE.stat().st_mtime
+        except OSError:
+            age = 0
+        if age >= LOCK_STALE_SECONDS:
+            logging.warning("Stale lock found (%.1fs old) — overriding", age)
+            break
+        if waited >= LOCK_WAIT_TIMEOUT:
+            logging.info(
+                "Another flush.py held the lock for >%ds, skipping (lock %.1fs old)",
+                waited, age,
+            )
+            return False
+        time.sleep(LOCK_POLL_INTERVAL)
+        waited += LOCK_POLL_INTERVAL
+    try:
+        LOCK_FILE.write_text(f"{os.getpid()} {time.time()}", encoding="utf-8")
+    except OSError as e:
+        logging.error("Failed to write lock file: %s", e)
+        return False
+    if waited > 0:
+        logging.info("Acquired flush lock after waiting %ds", waited)
+    return True
+
+
+def release_flush_lock() -> None:
+    if os.environ.get("CMC_FLUSH_SKIP_LOCK") == "1":
+        return
+    LOCK_FILE.unlink(missing_ok=True)
+
+
 def main():
     if len(sys.argv) < 3:
         logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
@@ -226,39 +422,50 @@ def main():
         context_file.unlink(missing_ok=True)
         return
 
-    # Read pre-extracted context
-    context = context_file.read_text(encoding="utf-8").strip()
-    if not context:
-        logging.info("Context file is empty, skipping")
-        context_file.unlink(missing_ok=True)
+    # Acquire concurrency lock — only one flush.py may invoke the Agent SDK
+    # across the entire vault at a time. See comment near LOCK_FILE definition.
+    if not acquire_flush_lock():
+        # Don't unlink the context file — let the running instance finish
+        # with it, or leave it for the next manual run.
         return
 
-    logging.info("Flushing session %s: %d chars", session_id, len(context))
+    try:
+        # Read pre-extracted context
+        context = context_file.read_text(encoding="utf-8").strip()
+        if not context:
+            logging.info("Context file is empty, skipping")
+            context_file.unlink(missing_ok=True)
+            return
 
-    # Run the LLM extraction
-    response = asyncio.run(run_flush(context))
+        logging.info("Flushing session %s: %d chars", session_id, len(context))
 
-    # Append to daily log
-    if "FLUSH_OK" in response:
-        logging.info("Result: FLUSH_OK (skipped)")
-    elif "FLUSH_ERROR" in response:
-        logging.error("Result: %s", response)
-        append_to_daily_log(response, "Memory Flush")
-    else:
-        logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        # Run the LLM extraction (now retries internally + captures stderr)
+        response, captured_stderr = asyncio.run(run_flush(context))
 
-    # Update dedup state
-    save_flush_state({"session_id": session_id, "timestamp": time.time()})
+        if "FLUSH_OK" in response:
+            logging.info("Result: FLUSH_OK (skipped)")
+        elif "FLUSH_ERROR" in response:
+            logging.error("Result: %s", response)
+            cause = detect_failure_cause(captured_stderr, response)
+            logging.error("Detected cause: %s", cause)
+            append_error_marker_to_daily(session_id, cause)
+        else:
+            logging.info("Result: saved to daily log (%d chars)", len(response))
+            append_to_daily_log(response, "Session")
 
-    # Clean up context file
-    context_file.unlink(missing_ok=True)
+        # Update dedup state
+        save_flush_state({"session_id": session_id, "timestamp": time.time()})
 
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
-    maybe_trigger_compilation()
+        # Clean up context file
+        context_file.unlink(missing_ok=True)
 
-    logging.info("Flush complete for session %s", session_id)
+        # End-of-day auto-compilation: if it's past the compile hour and today's
+        # log hasn't been compiled yet, trigger compile.py in the background.
+        maybe_trigger_compilation()
+
+        logging.info("Flush complete for session %s", session_id)
+    finally:
+        release_flush_lock()
 
 
 if __name__ == "__main__":

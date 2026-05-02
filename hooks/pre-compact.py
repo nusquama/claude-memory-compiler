@@ -202,6 +202,43 @@ def main() -> None:
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
 
+    # Also capture Claude Code's native /compact summaries from the
+    # transcript (idempotent — tracks already-emitted summary UUIDs).
+    # NOTE: at PreCompact time the new summary is not yet in the JSONL —
+    # this catches summaries from prior compacts in the same session, plus
+    # the current one once it lands (next hook run).
+    extract_native_script = SCRIPTS_DIR / "extract_native_summaries.py"
+    if extract_native_script.exists():
+        # --watch 600 polls the JSONL for up to 10 minutes; large compacts
+        # on long sessions can take 1-3 min before the summary lands. The
+        # script sleeps between polls so the cost is just an idle Python
+        # process waiting in background. Idempotent — safe to re-poll.
+        native_cmd = [
+            "uv",
+            "run",
+            "--directory",
+            str(ROOT),
+            "python",
+            str(extract_native_script),
+            str(transcript_path),
+            session_id,
+            "--watch",
+            "600",
+        ]
+        try:
+            subprocess.Popen(
+                native_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+            logging.info(
+                "Spawned extract_native_summaries.py for session %s",
+                session_id,
+            )
+        except Exception as e:
+            logging.error("Failed to spawn extract_native_summaries.py: %s", e)
+
 
 if __name__ == "__main__":
     main()

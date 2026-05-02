@@ -208,6 +208,34 @@ def main() -> None:
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
 
+    # Also capture Claude Code's native /compact summaries from the
+    # transcript (idempotent — tracks already-emitted summary UUIDs).
+    extract_native_script = SCRIPTS_DIR / "extract_native_summaries.py"
+    if extract_native_script.exists():
+        native_cmd = [
+            "uv",
+            "run",
+            "--directory",
+            str(ROOT),
+            "python",
+            str(extract_native_script),
+            str(transcript_path),
+            session_id,
+        ]
+        try:
+            subprocess.Popen(
+                native_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+            logging.info(
+                "Spawned extract_native_summaries.py for session %s",
+                session_id,
+            )
+        except Exception as e:
+            logging.error("Failed to spawn extract_native_summaries.py: %s", e)
+
 
 if __name__ == "__main__":
     main()
