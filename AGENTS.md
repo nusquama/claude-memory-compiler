@@ -30,34 +30,47 @@ daily/
 ├── ...
 ```
 
-Each file follows this format:
+Each file follows this format. Sections without real content are omitted —
+no padding, no quota.
 
 ```markdown
 # Daily Log: YYYY-MM-DD
 
 ## Sessions
 
-### Session (HH:MM) - Brief Title
+### Session (HH:MM)
 
-**Context:** What the user was working on.
+**Contexte:** What the user was working on (one line).
 
-**Key Exchanges:**
-- User asked about X, assistant explained Y
-- Decided to use Z approach because...
-- Discovered that W doesn't work when...
+**Décisions prises:**
+- `[Décidé]` Chose library X over Y — rationale extracted from the conversation.
 
-**Decisions Made:**
-- Chose library X over Y because...
-- Architecture: went with pattern Z
+**Chemins abandonnés:**
+- Tried approach Z → rejected because...
 
-**Lessons Learned:**
-- Always do X before Y to avoid...
-- The gotcha with Z is that...
+**Découvertes / gotchas:**
+- `[Découvert]` The gotcha with W is that...
 
-**Action Items:**
-- [ ] Follow up on X
-- [ ] Refactor Y when time permits
+**Entités mentionnées:**
+- LibraryX — auth layer for the API.
+- ServiceY — third-party SaaS used for Z.
+
+**Action items:**
+- [ ] Follow up on X.
 ```
+
+**Provenance markers** — every claim is tagged with how strongly it is
+established:
+
+- `[Établi]` — verified in code, docs, or by execution
+- `[Décidé]` — choice made in this session
+- `[Hypothèse]` — unverified guess (must not be promoted to fact downstream)
+- `[Découvert]` — gotcha/behaviour observed during the session
+
+`[Hypothèse]` markers preserve epistemic uncertainty across compilation. The
+compiler must not silently turn an `[Hypothèse]` into a stated fact in a
+concept article — it stays flagged until a later session confirms (then
+upgraded to `[Établi]`) or contradicts (flagged as a contradiction).
 
 ### Layer 2: `knowledge/` - Compiled Knowledge (LLM-Owned)
 
@@ -120,7 +133,14 @@ Format:
 
 ### Concept Articles (`knowledge/concepts/`)
 
-One article per atomic piece of knowledge. These are facts, patterns, decisions, preferences, and lessons extracted from your conversations.
+One article per atomic piece of knowledge — facts, patterns, decisions,
+gotchas extracted from your conversations.
+
+**No length minimums. No bullet quotas. No forced wikilinks.** Every
+section except `Sources` and frontmatter is optional. Add a section only
+when there is real content for it. A 100-word article with one solid Key
+Point and no Related Concepts is fine; a sparse article beats a padded
+one.
 
 ```markdown
 ---
@@ -136,24 +156,31 @@ updated: 2026-04-03
 
 # Concept Name
 
-[2-4 sentence core explanation]
+[Core explanation — as short as the topic warrants. No meta-description like
+"X is a thing that does Y"; explain the thing.]
 
-## Key Points
+## Key Points  (optional — only if there are distinct takeaways beyond Details)
 
-- [Bullet points, each self-contained]
+- [Self-contained bullets. Use provenance prefixes when relevant: "Décidé:",
+  "Hypothèse non vérifiée:", "Comportement observé:".]
 
-## Details
+## Details  (optional)
 
-[Deeper explanation, encyclopedia-style paragraphs]
+[Deeper explanation only if needed.]
 
-## Related Concepts
+## Contradictions  (only if a daily log contradicts an earlier claim)
 
-- [[concepts/related-concept]] - How it connects
+- 2026-04-15: daily/2026-04-15.md indicates [non-X], contradicts [X]
+  (original source: daily/2026-04-01.md). Resolution: pending.
 
-## Sources
+## Related Concepts  (optional — only if real, non-trivial links exist)
 
-- [[daily/2026-04-01.md]] - Initial discovery during project setup
-- [[daily/2026-04-03.md]] - Updated after debugging session
+- [[concepts/related-concept]] — How it actually connects (one line).
+
+## Sources  (required)
+
+- [[daily/2026-04-01.md]] — Initial discovery during project setup.
+- [[daily/2026-04-03.md]] — Updated after debugging session; added gotcha Z.
 ```
 
 ### Connection Articles (`knowledge/connections/`)
@@ -231,23 +258,47 @@ filed: 2026-04-05
 
 When processing a daily log:
 
-1. Read the daily log file
-2. Read `knowledge/index.md` to understand current knowledge state
-3. Read existing articles that may need updating
-4. For each piece of knowledge found in the log:
-   - If an existing concept article covers this topic: UPDATE it with new information, add the daily log as a source
-   - If it's a new topic: CREATE a new `concepts/` article
-5. If the log reveals a non-obvious connection between 2+ existing concepts: CREATE a `connections/` article
-6. UPDATE `knowledge/index.md` with new/modified entries
-7. APPEND to `knowledge/log.md`
+1. Read the daily log file.
+2. Read `knowledge/index.md` to understand current state.
+3. Read existing articles that may need updating.
+4. For each piece of knowledge in the log, apply the merge policy below.
+5. If the log reveals a non-obvious connection between 2+ existing concepts,
+   create a `connections/` article.
+6. Update `knowledge/index.md`.
+7. Append to `knowledge/log.md`.
 
-**Important guidelines:**
-- A single daily log may touch 3-10 knowledge articles
-- Prefer updating existing articles over creating near-duplicates
-- Use Obsidian-style `[[wikilinks]]` with full relative paths from knowledge/
-- Write in encyclopedia style - factual, concise, self-contained
-- Every article must have YAML frontmatter
-- Every article must link back to its source daily logs
+**Filtering policy — no quotas:**
+- Extract as many concepts as there are distinct signals. Mono-thematic log
+  → 1 article. Touffu log → as many articles as concepts. Never fragment
+  artificially. Never aggregate unrelated concepts in one article.
+- Don't invent. If the rationale isn't in the log, don't reconstruct it. In
+  doubt, omit. An omission is recoverable next cycle; a hallucination
+  self-reinforces.
+- No padding. No minimum bullet count, paragraph count, or wikilink count.
+
+**Merge policy — when an existing article already covers the topic:**
+
+| Situation | Action |
+|---|---|
+| Compatible (new info, no conflict) | Integrate, add daily log to `sources:`, bump `updated:` |
+| Contradictory (log says non-X, article says X) | Do NOT overwrite. Add a `## Contradictions` section flagging both claims with their sources. Resolution is left to the user. |
+| Redundant (same claim, already present) | Don't touch the body. Add the daily log to `sources:` to trace confirmation. |
+
+**Provenance preservation:**
+The daily log's `[Établi]`/`[Décidé]`/`[Hypothèse]`/`[Découvert]` markers
+must survive compilation. An `[Hypothèse]` becomes "Hypothèse non vérifiée:"
+in the article — never a stated fact. A later confirmation upgrades it to
+`[Établi]`; a later contradiction triggers the contradiction policy above.
+
+**Wikilink policy:**
+- Use `[[concepts/slug]]` / `[[connections/slug]]` (no `.md`).
+- Add a link only when the target exists AND is genuinely relevant.
+- An isolated article with zero outbound links is acceptable.
+- No padding links to hit a count.
+
+**Language:** match the dominant language of the daily log. No mixing
+languages within a single article. Technical terms (lib names, errors,
+commands) stay verbatim.
 
 ### 2. Query (Ask the Knowledge Base)
 
@@ -269,7 +320,7 @@ Seven checks, run periodically:
 4. **Stale articles** - Source daily log changed since article was last compiled
 5. **Contradictions** - Conflicting claims across articles (requires LLM judgment)
 6. **Missing backlinks** - A links to B but B doesn't link back to A
-7. **Sparse articles** - Below 200 words, likely incomplete
+7. **Sparse articles** - Below 200 words (suggestion only — sparse can be correct under the no-padding policy; the lint flags them so the user can confirm)
 
 Output: a markdown report with severity levels (error, warning, suggestion).
 

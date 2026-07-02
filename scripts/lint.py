@@ -146,8 +146,16 @@ def check_sparse_articles() -> list[dict]:
     return issues
 
 
+CONTRADICTION_MAX_ARTICLES = 40
+
+
 async def check_contradictions() -> list[dict]:
-    """Use LLM to detect contradictions across articles."""
+    """Use LLM to detect contradictions across articles.
+
+    Skipped above CONTRADICTION_MAX_ARTICLES because the current
+    implementation packs the full wiki into one prompt, which becomes
+    slow and expensive past that threshold and risks context blow-up.
+    """
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -155,6 +163,19 @@ async def check_contradictions() -> list[dict]:
         TextBlock,
         query,
     )
+
+    article_count = len(list_wiki_articles())
+    if article_count > CONTRADICTION_MAX_ARTICLES:
+        return [{
+            "severity": "warning",
+            "check": "contradiction",
+            "file": "(system)",
+            "detail": (
+                f"Skipped: {article_count} articles exceeds safe single-call "
+                f"limit ({CONTRADICTION_MAX_ARTICLES}). Re-run with "
+                f"--structural-only or implement chunked check."
+            ),
+        }]
 
     wiki_content = read_all_wiki_content()
 

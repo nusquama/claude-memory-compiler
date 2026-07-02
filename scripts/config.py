@@ -36,26 +36,58 @@ def resolve_project_dir() -> Path | None:
     """Return the per-project folder inside the vault, or None.
 
     Cascade:
+    0. If $CMC_PROJECT_DIR or $CMC_PROJECT is set, use that vault project
+       directly. This is for maintenance/backfill jobs that are not running
+       from a matching git checkout, such as the shared `Conversations` vault.
     1. Read $CLAUDE_PROJECT_DIR (set by Claude Code when launching hooks).
        Fallback to os.getcwd() for manual `uv run python …` invocations.
-    2. Run `git -C <start> rev-parse --show-toplevel`. If it fails, return None
-       (no project detected → skip silently).
-    3. Project name = basename of git toplevel. Reject names that start with "."
-       or are empty (defensive).
+    2. Resolve the canonical project root.
+       - In a normal checkout: `git rev-parse --show-toplevel`.
+       - In a git worktree: `--show-toplevel` returns the worktree path
+         (e.g. `<repo>/.claude/worktrees/foo`), not the main repo. We use
+         `--git-common-dir` to find the main `.git/` and take its parent.
+       Both cases unify to "the directory whose name is the project name in
+       the vault".
+    3. Project name = basename of canonical root. Reject names that start
+       with "." or are empty (defensive).
     """
+    explicit_dir = os.environ.get("CMC_PROJECT_DIR")
+    if explicit_dir:
+        candidate = Path(explicit_dir).expanduser().resolve()
+        return candidate if candidate.is_dir() else None
+
+    explicit_project = os.environ.get("CMC_PROJECT")
+    if explicit_project:
+        candidate = VAULT_ROOT / explicit_project
+        return candidate if candidate.is_dir() else None
+
     start = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     try:
-        result = subprocess.run(
+        toplevel_res = subprocess.run(
             ["git", "-C", start, "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=2,
+            capture_output=True, text=True, timeout=2,
+        )
+        common_res = subprocess.run(
+            ["git", "-C", start, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    if result.returncode != 0:
+    if toplevel_res.returncode != 0:
         return None
-    toplevel = Path(result.stdout.strip())
+
+    toplevel = Path(toplevel_res.stdout.strip())
+
+    # Worktree detection: --git-common-dir points to the MAIN .git/ even from
+    # inside a worktree. If common_dir != toplevel/.git, we're in a worktree
+    # and the canonical project root is the parent of the common dir.
+    if common_res.returncode == 0:
+        common_dir = Path(common_res.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (Path(start) / common_dir).resolve()
+        if common_dir.name == ".git" and common_dir.parent != toplevel:
+            toplevel = common_dir.parent
+
     project_name = toplevel.name
     if not project_name or project_name.startswith("."):
         return None
@@ -66,6 +98,16 @@ def resolve_project_dir() -> Path | None:
     # silently — preventing accidental capture in random git repos.
     candidate = VAULT_ROOT / project_name
     if not candidate.is_dir():
+        # Make silent failures visible: when we ARE in a git repo but the
+        # project is not vaulted, write a single line to stderr so debug
+        # logs show why hooks no-op. Claude Code surfaces hook stderr in
+        # debug mode without blocking the session.
+        if os.environ.get("CMC_DEBUG_RESOLUTION"):
+            print(
+                f"[cmc] PROJECT_DIR=None: '{project_name}' not in vault "
+                f"({VAULT_ROOT}). Run /cmc-init to enable.",
+                file=__import__("sys").stderr,
+            )
         return None
     return candidate
 
@@ -111,22 +153,39 @@ else:
 # Latest available per tier: Haiku 4.5, Sonnet 4.6, Opus 4.7. Versions
 # are NOT synchronized across tiers — there is no Haiku 4.7 or 4.6, and
 # no Opus 4.6.
-FLUSH_MODEL = os.environ.get("CMC_FLUSH_MODEL", "claude-haiku-4-5")
+# The daily log is a lossy bottleneck: whatever the extractor drops at this
+# stage is gone for good. compile.py and query.py operate on the daily log,
+# not the original source, so they cannot recover lost nuance. Both
+# extractors (flush, scan_md) therefore default to Sonnet to preserve the
+# rationale, gotchas, and abandoned paths that lower-tier models tend to
+# strip. Haiku is still available via env var for cost-bounded use cases
+# (massive sessions, repos with hundreds of low-density .md files).
+FLUSH_MODEL = os.environ.get("CMC_FLUSH_MODEL", "claude-sonnet-4-6")
+SCAN_MODEL = os.environ.get("CMC_SCAN_MODEL", "claude-sonnet-4-6")
 COMPILE_MODEL = os.environ.get("CMC_COMPILE_MODEL", "claude-sonnet-4-6")
 QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-6")
 
 
-# ── Conversation extraction limits ────────────────────────────────────
-# Bounds on how much of a session transcript flush.py sees.
-# Defaults: capture effectively the entire session for any normal coding
-# workload. Haiku 4.5 has a 200K-token context window (~600K chars), so
-# 150K chars + prompt + output fits comfortably with margin.
+# ── Conversation extraction limits & chunking ────────────────────────
+# Architecture: map-reduce. flush.py never truncates. If a conversation
+# exceeds FLUSH_SINGLE_PASS_THRESHOLD, it is split into chunks of
+# FLUSH_CHUNK_SIZE chars at turn boundaries, each chunk gets its own LLM
+# call (partial extraction), then a single consolidation call merges the
+# partial summaries into the final daily log entry. No content is dropped
+# regardless of session length.
 #
-# If you find Haiku context-overflowing on very long sessions, lower
-# CMC_FLUSH_MAX_CHARS — the truncation keeps the LAST N chars (where
-# conclusions live).
-FLUSH_MAX_TURNS = int(os.environ.get("CMC_FLUSH_MAX_TURNS", "1000"))
-FLUSH_MAX_CHARS = int(os.environ.get("CMC_FLUSH_MAX_CHARS", "150000"))
+# Sonnet 4.6 has a 200K-token context window (~800K chars at 4 chars/token).
+# Per-chunk budget = 120K chars, leaving comfortable headroom for the
+# prompt itself (~10K), retry buffer, and output (~5K).
+#
+# FLUSH_MAX_CHARS is now a hard safety cap, not the working budget — it
+# only protects against pathological inputs (corrupted transcripts, etc.).
+# Real conversations of any realistic length flow through the chunking
+# pipeline without loss.
+FLUSH_MAX_TURNS = int(os.environ.get("CMC_FLUSH_MAX_TURNS", "10000"))
+FLUSH_MAX_CHARS = int(os.environ.get("CMC_FLUSH_MAX_CHARS", "5000000"))  # 5M — hard safety cap
+FLUSH_SINGLE_PASS_THRESHOLD = int(os.environ.get("CMC_FLUSH_SINGLE_PASS_THRESHOLD", "200000"))
+FLUSH_CHUNK_SIZE = int(os.environ.get("CMC_FLUSH_CHUNK_SIZE", "120000"))
 
 
 # ── Timezone ──────────────────────────────────────────────────────────

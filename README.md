@@ -25,10 +25,17 @@ From there, your conversations start accumulating. After 6 PM local time, the ne
 Conversation -> SessionEnd/PreCompact hooks -> flush.py extracts knowledge
     -> daily/YYYY-MM-DD.md -> compile.py -> knowledge/concepts/, connections/, qa/
         -> SessionStart hook injects index into next session -> cycle repeats
+
+git repo .md files -> scan_md.py (Haiku summarises) -> daily log -> compile.py
+
+Codex sessions -> ~/.codex notify wrapper -> backfill_codex.py
+    -> daily/YYYY-MM-DD.md -> compile.py
 ```
 
 - **Hooks** capture conversations automatically (session end + pre-compaction safety net)
 - **flush.py** calls the Claude Agent SDK to decide what's worth saving, and after 6 PM triggers end-of-day compilation automatically
+- **scan_md.py** ingests existing project documentation (`.md` files in your git repo) as a second knowledge source, with hash-based dedup and date filters
+- **backfill_codex.py** converts Codex JSONL rollouts from `~/.codex/sessions` into CMC daily logs, then can compile affected projects
 - **compile.py** turns daily logs into organized concept articles with cross-references (triggered automatically or run manually)
 - **query.py** answers questions using index-guided retrieval (no RAG needed at personal scale)
 - **lint.py** runs 7 health checks (broken links, orphans, contradictions, staleness)
@@ -36,12 +43,34 @@ Conversation -> SessionEnd/PreCompact hooks -> flush.py extracts knowledge
 ## Key Commands
 
 ```bash
-uv run python scripts/compile.py                    # compile new daily logs
+uv run python scripts/compile.py                     # compile new daily logs
 uv run python scripts/query.py "question"            # ask the knowledge base
 uv run python scripts/query.py "question" --file-back # ask + save answer back
 uv run python scripts/lint.py                        # run health checks
 uv run python scripts/lint.py --structural-only      # free structural checks only
+
+# Ingest the current repo's .md files (run from your project root)
+uv run python scripts/scan_md.py --menu              # interactive menu (recommended)
+uv run python scripts/scan_md.py                     # only changed files since last scan
+uv run python scripts/scan_md.py --init              # full rescan from scratch
+uv run python scripts/scan_md.py --days 7            # files modified in the last 7 days
+uv run python scripts/scan_md.py --since 2026-04-01  # files modified since a date
+uv run python scripts/scan_md.py --dry-run           # preview without LLM calls
+
+# Ingest Codex sessions into the CMC vault
+uv run python scripts/backfill_codex.py --dry-run --fallback-project Conversations
+uv run python scripts/backfill_codex.py --fallback-project Conversations --compile
 ```
+
+Codex automatic capture is enabled through `/Users/franck/.codex/config.toml`.
+Computer Use may keep its own `notify` command in front and pass the CMC
+wrapper as `--previous-notify`; this is expected. The previous notify points
+to `/Users/franck/.agents/bin/codex-turn-ended`, which launches
+`/Users/franck/.agents/bin/codex-cmc-backfill` after an idle delay. The
+automatic worker is intentionally bounded: it skips sessions modified in the
+last 15 minutes and skips contexts above 120k characters; use the manual
+`backfill_codex.py` command for large historical sessions. Rollback:
+restore `/Users/franck/.codex/backups/config.toml.pre-cmc-codex-notify-20260601`.
 
 ## Why No RAG?
 
@@ -50,3 +79,5 @@ Karpathy's insight: at personal scale (50-500 articles), the LLM reading a struc
 ## Technical Reference
 
 See **[AGENTS.md](AGENTS.md)** for the complete technical reference: article formats, hook architecture, script internals, cross-platform details, costs, and customization options. AGENTS.md is designed to give an AI agent everything it needs to understand, modify, or rebuild the system.
+
+Release history is in **[CHANGELOG.md](CHANGELOG.md)**.

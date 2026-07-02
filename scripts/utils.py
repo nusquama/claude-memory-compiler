@@ -52,8 +52,14 @@ def slugify(text: str) -> str:
 # ── Wikilink helpers ──────────────────────────────────────────────────
 
 def extract_wikilinks(content: str) -> list[str]:
-    """Extract all [[wikilinks]] from markdown content."""
-    return re.findall(r"\[\[([^\]]+)\]\]", content)
+    """Extract all [[wikilinks]] from markdown content.
+
+    Strips Obsidian-style alias suffix `|alias` and anchor suffix `#section`
+    so that `[[concepts/foo|raccourci]]` and `[[concepts/foo#bar]]` both
+    normalize to `concepts/foo`.
+    """
+    raw = re.findall(r"\[\[([^\]]+)\]\]", content)
+    return [link.split("|", 1)[0].split("#", 1)[0].strip() for link in raw]
 
 
 def wiki_article_exists(link: str) -> bool:
@@ -105,13 +111,17 @@ def list_raw_files() -> list[Path]:
 # ── Index helpers ─────────────────────────────────────────────────────
 
 def count_inbound_links(target: str, exclude_file: Path | None = None) -> int:
-    """Count how many wiki articles link to a given target."""
+    """Count how many wiki articles link to a given target.
+
+    Uses extract_wikilinks so aliased/anchored links count correctly
+    (`[[target|alias]]` and `[[target#section]]` both match `target`).
+    """
     count = 0
     for article in list_wiki_articles():
         if article == exclude_file:
             continue
         content = article.read_text(encoding="utf-8")
-        if f"[[{target}]]" in content:
+        if target in extract_wikilinks(content):
             count += 1
     return count
 

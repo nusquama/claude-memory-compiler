@@ -21,10 +21,19 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import PROJECT_DIR, SCRIPTS_DIR, TOOL_DIR as ROOT
+from config import (
+    FLUSH_MAX_CHARS,
+    FLUSH_MAX_TURNS,
+    PROJECT_DIR,
+    SCRIPTS_DIR,
+    TOOL_DIR as ROOT,
+)
 
-MAX_TURNS = int(os.environ.get("CMC_MAX_TURNS", 300))
-MAX_CONTEXT_CHARS = int(os.environ.get("CMC_MAX_CONTEXT_CHARS", 120_000))
+# Honour the same window settings as the SessionEnd / PreCompact hooks so
+# manual backfills capture the same depth of context. Override-friendly
+# via the `CMC_*` env vars defined in config.py.
+MAX_TURNS = FLUSH_MAX_TURNS
+MAX_CONTEXT_CHARS = FLUSH_MAX_CHARS
 MIN_TURNS_TO_FLUSH = 2
 
 
@@ -125,11 +134,15 @@ def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
     recent = turns[-MAX_TURNS:]
     context = "\n".join(recent)
 
+    # Hard safety cap only — flush.py handles real-size conversations via
+    # map-reduce chunking. Below the cap, no content is dropped.
     if len(context) > MAX_CONTEXT_CHARS:
-        context = context[-MAX_CONTEXT_CHARS:]
-        boundary = context.find("\n**")
-        if boundary > 0:
-            context = context[boundary + 1:]
+        elided = len(context) - MAX_CONTEXT_CHARS
+        context = (
+            f"...[{elided} chars elided — exceeded hard cap of "
+            f"{MAX_CONTEXT_CHARS} chars; kept tail only]...\n\n"
+            + context[-MAX_CONTEXT_CHARS:]
+        )
 
     return context, len(recent)
 

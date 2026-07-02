@@ -1,12 +1,17 @@
 """
 PreCompact hook - captures conversation transcript before auto-compaction.
 
-When Claude Code's context window fills up, it auto-compacts (summarizes and
-discards detail). This hook fires BEFORE that happens, extracting conversation
-context and spawning flush.py to extract knowledge that would otherwise
-be lost to summarization.
+When Claude Code's context window fills up, it auto-compacts (summarizes
+and discards detail). This hook fires BEFORE that happens, slicing the
+INCREMENTAL conversation context since the last cursor position and
+spawning flush.py to extract knowledge that would otherwise be lost to
+summarization.
 
 The hook itself does NO API calls - only local file I/O for speed (<10s).
+
+Cursor coordination: shares state with hooks/stop-flush-checkpoint.py and
+hooks/session-end.py via .state/checkpoint-cursor.json. Slice forward,
+advance on spawn — never re-extract content already captured.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,11 +35,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from config import (  # noqa: E402
     FLUSH_LOG,
     FLUSH_MAX_CHARS,
-    FLUSH_MAX_TURNS,
     PROJECT_DIR,
     SCRIPTS_DIR,
     STATE_DIR,
     TOOL_DIR as ROOT,
+)
+from checkpoint_cursor import (  # noqa: E402
+    extract_incremental_slice,
+    gc_old_entries,
+    get_session_state,
+    load_cursor,
+    save_cursor,
 )
 
 if PROJECT_DIR is None:
@@ -48,87 +60,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-MAX_TURNS = FLUSH_MAX_TURNS
-MAX_CONTEXT_CHARS = FLUSH_MAX_CHARS
+# Pre-compact fires when Claude Code is about to summarize away detail.
+# Lower threshold than periodic checkpoint: even a small slice is worth
+# saving since the alternative is loss to summarization.
 MIN_TURNS_TO_FLUSH = 5
-
-
-def extract_turns_from_jsonl(jsonl_path: Path) -> list[str]:
-    """Extract conversation turns from a single JSONL file."""
-    turns: list[str] = []
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            msg = entry.get("message", {})
-            if isinstance(msg, dict):
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-            else:
-                role = entry.get("role", "")
-                content = entry.get("content", "")
-
-            if role not in ("user", "assistant"):
-                continue
-
-            if isinstance(content, list):
-                parts = []
-                for block in content:
-                    if not isinstance(block, dict):
-                        if isinstance(block, str):
-                            parts.append(block)
-                        continue
-                    btype = block.get("type", "")
-                    if btype == "text":
-                        parts.append(block.get("text", ""))
-                    elif btype == "tool_use":
-                        name = block.get("name", "?")
-                        inp = block.get("input", {})
-                        inp_str = json.dumps(inp, ensure_ascii=False)[:200]
-                        parts.append(f"[Tool: {name}] {inp_str}")
-                    # skip tool_result and thinking blocks
-                content = "\n".join(p for p in parts if p.strip())
-
-            if isinstance(content, str) and content.strip():
-                label = "User" if role == "user" else "Assistant"
-                turns.append(f"**{label}:** {content.strip()}\n")
-
-    return turns
-
-
-def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
-    """Read JSONL transcript and extract last ~N conversation turns as markdown."""
-    turns = extract_turns_from_jsonl(transcript_path)
-
-    # Also include subagent transcripts if present
-    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
-    if subagents_dir.exists():
-        for subagent_file in sorted(subagents_dir.glob("*.jsonl")):
-            sub_turns = extract_turns_from_jsonl(subagent_file)
-            if sub_turns:
-                turns.append(f"**[Subagent: {subagent_file.stem}]**\n")
-                turns.extend(sub_turns)
-
-    recent = turns[-MAX_TURNS:]
-    context = "\n".join(recent)
-
-    if len(context) > MAX_CONTEXT_CHARS:
-        context = context[-MAX_CONTEXT_CHARS:]
-        boundary = context.find("\n**")
-        if boundary > 0:
-            context = context[boundary + 1 :]
-
-    return context, len(recent)
+CURSOR_FILE = STATE_DIR / "checkpoint-cursor.json"
 
 
 def main() -> None:
-    # Read hook input from stdin
     try:
         raw_input = sys.stdin.read()
         try:
@@ -155,75 +94,66 @@ def main() -> None:
         logging.info("SKIP: transcript missing: %s", transcript_path_str)
         return
 
-    # Extract conversation context in the hook
-    try:
-        context, turn_count = extract_conversation_context(transcript_path)
-    except Exception as e:
-        logging.error("Context extraction failed: %s", e)
-        return
-
-    if not context.strip():
-        logging.info("SKIP: empty context")
-        return
-
-    if turn_count < MIN_TURNS_TO_FLUSH:
-        logging.info("SKIP: only %d turns (min %d)", turn_count, MIN_TURNS_TO_FLUSH)
-        return
-
-    # Write context to a temp file for the background process
-    timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
-    context_file = STATE_DIR / f"flush-context-{session_id}-{timestamp}.md"
-    context_file.write_text(context, encoding="utf-8")
-
-    # Spawn flush.py as a background process
-    flush_script = SCRIPTS_DIR / "flush.py"
-
-    cmd = [
-        "uv",
-        "run",
-        "--directory",
-        str(ROOT),
-        "python",
-        str(flush_script),
-        str(context_file),
-        session_id,
-    ]
-
-    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    cursor = load_cursor(CURSOR_FILE)
+    state = get_session_state(cursor, session_id)
 
     try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
+        context, new_turns, next_state = extract_incremental_slice(
+            transcript_path, state, FLUSH_MAX_CHARS
         )
-        logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))
     except Exception as e:
-        logging.error("Failed to spawn flush.py: %s", e)
+        logging.error("Slice extraction failed: %s", e)
+        return
 
-    # Also capture Claude Code's native /compact summaries from the
-    # transcript (idempotent — tracks already-emitted summary UUIDs).
-    # NOTE: at PreCompact time the new summary is not yet in the JSONL —
-    # this catches summaries from prior compacts in the same session, plus
-    # the current one once it lands (next hook run).
+    if new_turns >= MIN_TURNS_TO_FLUSH and context.strip():
+        next_state["last_flush_ts"] = time.time()
+        cursor[session_id] = next_state
+        cursor = gc_old_entries(cursor, time.time())
+        save_cursor(CURSOR_FILE, cursor)
+
+        timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+        context_file = STATE_DIR / f"flush-context-{session_id}-{timestamp}.md"
+        context_file.write_text(context, encoding="utf-8")
+
+        flush_script = SCRIPTS_DIR / "flush.py"
+        cmd = [
+            "uv", "run", "--directory", str(ROOT),
+            "python", str(flush_script),
+            str(context_file), session_id,
+            "--label", "pre-compact",
+        ]
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+            logging.info(
+                "Spawned flush.py for session %s (%d new turns, %d chars)",
+                session_id, new_turns, len(context),
+            )
+        except Exception as e:
+            logging.error("Failed to spawn flush.py: %s", e)
+    else:
+        logging.info(
+            "SKIP: only %d new turns (min %d) since last cursor",
+            new_turns, MIN_TURNS_TO_FLUSH,
+        )
+
+    # Capture Claude Code's native /compact summaries — independent path
+    # with its own dedup.
     extract_native_script = SCRIPTS_DIR / "extract_native_summaries.py"
     if extract_native_script.exists():
-        # --watch 600 polls the JSONL for up to 10 minutes; large compacts
-        # on long sessions can take 1-3 min before the summary lands. The
-        # script sleeps between polls so the cost is just an idle Python
-        # process waiting in background. Idempotent — safe to re-poll.
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        # --watch 600: large compacts can take 1–3 min before the summary
+        # lands in the JSONL. The script polls patiently in background.
         native_cmd = [
-            "uv",
-            "run",
-            "--directory",
-            str(ROOT),
-            "python",
-            str(extract_native_script),
-            str(transcript_path),
-            session_id,
-            "--watch",
-            "600",
+            "uv", "run", "--directory", str(ROOT),
+            "python", str(extract_native_script),
+            str(transcript_path), session_id,
+            "--watch", "600",
         ]
         try:
             subprocess.Popen(
