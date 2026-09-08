@@ -27,6 +27,10 @@ All notable changes to this project are documented in this file. Format follows 
   therefore never rejected by the database ("ACE message is not sanitized",
   "unsupported Unicode escape sequence"). Eight historical rows were
   re-sanitized in place and ingested.
+- `ace collect --since YYYY-MM-DD`: explicit date bound for a historical
+  replay, replacing both the activation cutoff and `--days`; implies
+  `--all-history` for that window. Restores the `backfill_codex.py --since`
+  capability.
 - Analysis salvage: `_normalise_model_report` no longer discards a whole
   conversation report because one claim cites a proof outside the supplied
   evidence windows. Claims whose proof resolves are kept, the discarded count

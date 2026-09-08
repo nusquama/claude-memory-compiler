@@ -789,9 +789,13 @@ class ACEPipeline:
                 return method
         return None
 
-    def _source_paths(self, source_paths: Sequence[str | Path | Mapping[str, Any]], all_history: bool, days: int) -> list[dict[str, Any]]:
+    def _source_paths(self, source_paths: Sequence[str | Path | Mapping[str, Any]], all_history: bool, days: int, since: float | None = None) -> list[dict[str, Any]]:
         automation_since = None if all_history else self._automation_since(create=True)
         cutoff = automation_since if automation_since is not None else time.time() - max(0, days) * 86400
+        if since is not None:
+            # An explicit start date (``--since YYYY-MM-DD``) is the operator's
+            # bound: it replaces both the activation cutoff and ``--days``.
+            cutoff = float(since)
         candidates: list[dict[str, Any]] = []
         for raw in source_paths:
             configured_source: str | None = None
@@ -907,6 +911,7 @@ class ACEPipeline:
         source: str | None,
         all_history: bool,
         days: int,
+        since: float | None = None,
     ) -> tuple[dict[str, list[dict[str, Any]]], int, int]:
         """Group files only by an explicitly registered source root."""
         registry = self.projects
@@ -932,7 +937,7 @@ class ACEPipeline:
         candidates_count = 0
         for kind in kinds:
             roots = source_paths if source_paths else self._default_source_paths(kind)
-            paths = self._source_paths(roots, all_history, days)
+            paths = self._source_paths(roots, all_history, days, since)
             for item in paths:
                 path = Path(item["path"])
                 route_candidates: list[dict[str, Any]] = []
@@ -1343,6 +1348,7 @@ class ACEPipeline:
         all_history: bool = False,
         sync: bool = False,
         extract: bool = False,
+        since: float | None = None,
     ) -> dict[str, Any]:
         # Native scheduling invokes ``collect --sync`` without a project path.
         # Enumerate only explicitly registered projects and run the same
@@ -1368,6 +1374,7 @@ class ACEPipeline:
                 source=source,
                 all_history=all_history,
                 days=days,
+                since=since,
             )
             aggregate["candidates"] = discovered_count
             aggregate["unrouted"] = unrouted
@@ -1384,6 +1391,7 @@ class ACEPipeline:
                     all_history=all_history,
                     sync=sync,
                     extract=extract,
+                    since=since,
                 )
                 aggregate["projects"] += 1
                 for key in ("queued", "unchanged", "failed", "deferred", "unexamined"):
@@ -1397,7 +1405,7 @@ class ACEPipeline:
         # native transcript iterator may parse bodies while yielding; calling
         # it for the whole discovered set would defeat ``limit`` and make an
         # interrupted tick expensive and non-resumable.
-        metadata_candidates = self._source_paths(source_paths, all_history, days)
+        metadata_candidates = self._source_paths(source_paths, all_history, days, since)
         metadata_candidates = self._fair_order(metadata_candidates, state)
         if limit >= 0:
             selected_metadata = metadata_candidates[:limit]
@@ -5339,6 +5347,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--host-id")
     collect.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     collect.add_argument("--days", type=int, default=7)
+    collect.add_argument("--since", help="only transcripts modified since YYYY-MM-DD (explicit history bound)")
     collect.add_argument("--all-history", action="store_true")
     collect.add_argument("--sync", action="store_true")
     collect.add_argument("--extract", action="store_true", help="write daily logs locally right after capture")
@@ -5448,7 +5457,10 @@ def dispatch(args: argparse.Namespace, pipeline: ACEPipeline) -> dict[str, Any]:
         return pipeline._init_project(args.cwd)
     if command == "collect":
         paths = list(args.sourcepaths or []) + list(args.paths or [])
-        return pipeline.collect(paths, cwd=args.cwd, source=args.source, host_id=args.host_id, limit=args.limit, days=args.days, all_history=args.all_history, sync=args.sync, extract=args.extract)
+        since = None
+        if args.since:
+            since = datetime.combine(date.fromisoformat(args.since), datetime.min.time(), tzinfo=PARIS).timestamp()
+        return pipeline.collect(paths, cwd=args.cwd, source=args.source, host_id=args.host_id, limit=args.limit, days=args.days, all_history=args.all_history or since is not None, sync=args.sync, extract=args.extract, since=since)
     if command == "sync":
         return pipeline.sync(cwd=args.cwd, limit=args.limit)
     if command == "process":
