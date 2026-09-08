@@ -27,6 +27,12 @@ All notable changes to this project are documented in this file. Format follows 
   therefore never rejected by the database ("ACE message is not sanitized",
   "unsupported Unicode escape sequence"). Eight historical rows were
   re-sanitized in place and ingested.
+- Morning report section 8 « Santé de ACE » (`_ace_health`): outbox rows not
+  acknowledged with their error, collection read failures and unexamined
+  backlog, failed transcripts by error type, failed morning cycle, pending
+  extractions by error, failed/pending compile or analysis per project,
+  rejected model reports, native service tracebacks and last tick failures.
+  Local state only, no model, no database.
 - `ace lint [--structural-only]` delegates `scripts/lint.py` under the shared
   tick lock; `ace collect --dry-run` previews routing per project (`would_queue`)
   without parse, queue, cursor or state write. Both existed in CMC.

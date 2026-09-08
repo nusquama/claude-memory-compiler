@@ -116,3 +116,44 @@ def test_report_without_any_analysis_is_explicit(tmp_path: Path) -> None:
     content = morning.build_report(root, "2026-09-08")
     assert "Aucun incident retenu avec preuve." in content
     assert "Aucune mesure de tokens disponible." in content
+
+
+def test_health_section_reports_pipeline_errors(private_root: Path) -> None:
+    import sqlite3
+
+    con = sqlite3.connect(private_root / "outbox.sqlite3")
+    con.execute(
+        "create table ace_outbox (key text primary key, source text, project_id text, session_id text, revision text,"
+        " payload text, payload_bytes integer, status text, attempts integer, next_attempt_at real, lease_until real,"
+        " receipt text, last_error text, created_at real, updated_at real)"
+    )
+    con.execute(
+        "insert into ace_outbox values ('k1','claude','p1','s1','r1','{}',2,'retry',3,0,NULL,NULL,'SupabaseStoreError',0,0)"
+    )
+    con.commit()
+    con.close()
+    _write(
+        private_root / "collection.json",
+        {
+            "projects": {"p1": {"coverage": {"failed": 2, "unexamined": 0}}},
+            "sessions": {"/tmp/a.jsonl": {"status": "failed", "error_type": "EmptyTranscriptError"}},
+            "automation_daily": {"2026-09-08": {"status": "failed", "attempts": 3, "last_error": "daily stages failed"}},
+        },
+    )
+    _write(private_root / "extraction.json", {"snapshots": {"x": {"status": "pending", "error_type": "PipelineError"}}})
+    _write(private_root / "analysis.json", {"projects": {"p1": {"days": {"2026-09-08": {"status": "pending", "reason": "stage_failed"}}}}})
+    content = morning.build_report(private_root, "2026-09-08")
+    assert "## 8. Santé de ACE" in content
+    assert "1 conversation(s) en état `retry` (SupabaseStoreError)" in content
+    assert "Collecte alpha : 2 échec(s) de lecture" in content
+    assert "EmptyTranscriptError=1" in content
+    assert "Cycle du matin du 2026-09-08 : échec après 3 tentative(s)" in content
+    assert "Extraction non terminée : PipelineError=1" in content
+    assert "Analyse alpha le 2026-09-08 : `pending` stage_failed" in content
+
+
+def test_health_section_is_quiet_when_state_is_clean(tmp_path: Path) -> None:
+    root = tmp_path / "clean"
+    _write(root / "projects.json", {"projects": {"p1": {"name": "alpha"}}})
+    content = morning.build_report(root, "2026-09-08")
+    assert "Aucune erreur de la chaîne détectée" in content

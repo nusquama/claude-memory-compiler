@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -110,6 +111,139 @@ def _tokens(stage_metrics: Any) -> dict[str, dict[str, int]]:
             row["calls"] = int(calls)
         result[str(stage)] = row
     return result
+
+
+def _ace_health(private_root: Path, day: str, names: Mapping[str, str]) -> list[str]:
+    """Report the pipeline's own errors from local state only. No model, no DB."""
+    lines: list[str] = []
+    problems = 0
+
+    # 1. Outbox: what never reached the database.
+    db_path = private_root / "outbox.sqlite3"
+    if db_path.exists():
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            rows = con.execute(
+                "select status, count(*), coalesce(substr(last_error,1,60),'') from ace_outbox "
+                "where status != 'acknowledged' group by status, 3"
+            ).fetchall()
+            con.close()
+        except sqlite3.Error as error:
+            rows = []
+            lines.append(f"- File de sortie illisible : {type(error).__name__}.")
+            problems += 1
+        for status, count, error in rows:
+            problems += int(count)
+            detail = f" ({error})" if error else ""
+            lines.append(f"- File de sortie : {count} conversation(s) en état `{status}`{detail}.")
+    else:
+        lines.append("- File de sortie absente.")
+
+    # 2. Collection: unrouted, unexamined, failed per project.
+    collection = _load_json(private_root / "collection.json") or {}
+    projects = collection.get("projects") if isinstance(collection.get("projects"), Mapping) else {}
+    for project_id, item in projects.items():
+        coverage = item.get("coverage") if isinstance(item, Mapping) else None
+        if not isinstance(coverage, Mapping):
+            continue
+        failed = int(coverage.get("failed") or 0)
+        unexamined = int(coverage.get("unexamined") or 0)
+        if failed or unexamined > 50:
+            problems += 1
+            lines.append(
+                f"- Collecte {names.get(str(project_id), str(project_id))} : {failed} échec(s) de lecture, {unexamined} fichier(s) non examiné(s)."
+            )
+    sessions = collection.get("sessions") if isinstance(collection.get("sessions"), Mapping) else {}
+    failed_sessions = [k for k, v in sessions.items() if isinstance(v, Mapping) and v.get("status") == "failed"]
+    if failed_sessions:
+        problems += len(failed_sessions)
+        kinds: dict[str, int] = {}
+        for key in failed_sessions:
+            kind = str(sessions[key].get("error_type") or "inconnu")
+            kinds[kind] = kinds.get(kind, 0) + 1
+        lines.append("- Transcripts en échec de lecture : " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())) + ".")
+    automation = collection.get("automation_daily") if isinstance(collection.get("automation_daily"), Mapping) else {}
+    today = automation.get(day) if isinstance(automation.get(day), Mapping) else None
+    if today and today.get("status") == "failed":
+        problems += 1
+        lines.append(
+            f"- Cycle du matin du {day} : échec après {today.get('attempts')} tentative(s), motif « {_clip(today.get('last_error'), 120)} »."
+        )
+
+    # 3. Extraction: snapshots still pending with an error type.
+    extraction = _load_json(private_root / "extraction.json") or {}
+    snapshots = extraction.get("snapshots") if isinstance(extraction.get("snapshots"), Mapping) else {}
+    pending_kinds: dict[str, int] = {}
+    for record in snapshots.values():
+        if isinstance(record, Mapping) and record.get("status") == "pending":
+            kind = str(record.get("error_type") or "en attente")
+            pending_kinds[kind] = pending_kinds.get(kind, 0) + 1
+    if pending_kinds:
+        problems += sum(pending_kinds.values())
+        lines.append("- Extraction non terminée : " + ", ".join(f"{k}={v}" for k, v in sorted(pending_kinds.items())) + ".")
+
+    # 4. Compile / analysis state for the day, per project.
+    for state_name, label in (("compile", "Compilation"), ("analysis", "Analyse")):
+        state = _load_json(private_root / f"{state_name}.json") or {}
+        by_project = state.get("projects") if isinstance(state.get("projects"), Mapping) else {}
+        for project_id, item in by_project.items():
+            days = item.get("days") if isinstance(item, Mapping) else None
+            record = days.get(day) if isinstance(days, Mapping) else None
+            if not isinstance(record, Mapping):
+                continue
+            status = str(record.get("status") or "")
+            if status in {"failed", "pending"} or record.get("error_type") or record.get("analysis_status") in {"failed", "pending"}:
+                problems += 1
+                reason = record.get("reason") or record.get("pending_reason") or record.get("error_type") or ""
+                lines.append(
+                    f"- {label} {names.get(str(project_id), str(project_id))} le {day} : `{status or record.get('analysis_status')}` {reason}."
+                )
+
+    # 5. Model reports rejected today.
+    for project_id, name in names.items():
+        attempt = private_root / "audits" / project_id / f"{day}.attempt.json"
+        if attempt.exists():
+            payload = _load_json(attempt) or {}
+            if str(payload.get("analysis_status") or "") == "model-error":
+                problems += 1
+                lines.append(f"- Analyse {name} : au moins un rapport du modèle refusé (preuve introuvable ou JSON invalide), reprise automatique.")
+
+    # 6. Native service log.
+    error_log = private_root / "launchd.error.log"
+    if error_log.exists():
+        try:
+            age_hours = (datetime.now(PARIS).timestamp() - error_log.stat().st_mtime) / 3600
+            text = error_log.read_text(encoding="utf-8", errors="replace")
+            tracebacks = text.count("Traceback (most recent call last)")
+            if age_hours <= 24 and tracebacks:
+                problems += 1
+                last = [line for line in text.splitlines() if line.strip().startswith(("ace_", "json.", "Supabase", "WARNING"))]
+                tail = _clip(last[-1], 140) if last else "voir le journal"
+                lines.append(f"- Service natif : {tracebacks} trace(s) d'erreur dans le journal, dernière : « {tail} ».")
+        except OSError:
+            pass
+    tick_log = private_root / "launchd.log"
+    if tick_log.exists():
+        try:
+            last_line = tick_log.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1]
+            tick = json.loads(last_line)
+            summary = []
+            for stage in ("collect", "sync", "process", "daily"):
+                block = tick.get(stage) if isinstance(tick.get(stage), Mapping) else {}
+                failed = int(block.get("failed") or 0)
+                if failed:
+                    problems += 1
+                summary.append(f"{stage} échec={failed}")
+            if tick.get("error"):
+                summary.append(f"erreur={tick.get('error')}")
+            lines.append("- Dernier tick natif : " + ", ".join(summary) + ".")
+        except (OSError, ValueError, IndexError):
+            lines.append("- Dernier tick natif : journal illisible.")
+
+    header = ["## 8. Santé de ACE", ""]
+    if problems == 0:
+        return header + ["Aucune erreur de la chaîne détectée dans l'état local.", *lines, ""]
+    return header + [f"{problems} point(s) à regarder.", "", *lines, ""]
 
 
 def build_report(private_root: Path, day: str) -> str:
@@ -269,6 +403,7 @@ def build_report(private_root: Path, day: str) -> str:
     for item in limits:
         lines.append(f"- {item}")
     lines.append("")
+    lines.extend(_ace_health(private_root, day, names))
     return "\n".join(lines)
 
 
