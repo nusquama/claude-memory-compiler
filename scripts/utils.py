@@ -55,6 +55,44 @@ _PRIVATE_KEY_RE = re.compile(
 )
 
 
+# Exact mirror of the central ``ace.jsonb_is_clean`` string rules. The local
+# redactor above is permissive by design; this final pass guarantees that a
+# message accepted here is never rejected by the database afterwards.
+_DB_MARKER_PAIR_RE = re.compile(
+    rf"(?i)(^|[^A-Za-z0-9_])[\"']?(?:{_SECRET_NAME})[\"']?\s*[:=]\s*(?:<REDACTED>|'<REDACTED>'|\"<REDACTED>\")([^A-Za-z0-9_]|$)"
+)
+_DB_ASSIGN_RE = re.compile(
+    rf"(?i)(?P<prefix>(?:^|[^A-Za-z0-9_])[\"']?(?:{_SECRET_NAME})[\"']?\s*[:=]\s*)(?P<value>[^\s,;&]+)"
+)
+_DB_FLAG_RE = re.compile(
+    rf"(?i)(?P<prefix>--(?:{_SECRET_NAME})\s+)(?P<value>\S+)"
+)
+_DB_TOKEN_RE = re.compile(
+    r"(^|[^A-Za-z0-9_])(sk-(?:live-|test-|proj-)?[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9_]{20,}|"
+    r"sb_secret_[A-Za-z0-9_-]{16,}|github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16})(?=[^A-Za-z0-9_-]|$)"
+)
+
+
+def _database_clean_pass(content: str) -> str:
+    """Apply the database's own secret grammar so both sides agree."""
+    # Postgres jsonb rejects NUL escapes outright.
+    content = content.replace("\x00", "")
+    probe = _DB_MARKER_PAIR_RE.sub(r"\1\2", content)
+    if not (_DB_ASSIGN_RE.search(probe) or _DB_FLAG_RE.search(probe) or _DB_TOKEN_RE.search(probe)):
+        return content
+
+    def keep_marker(match: "re.Match[str]") -> str:
+        value = match.group("value")
+        if value.strip("\"'") == "<REDACTED>":
+            return match.group(0)
+        return f"{match.group('prefix')}<REDACTED>"
+
+    content = _DB_ASSIGN_RE.sub(keep_marker, content)
+    content = _DB_FLAG_RE.sub(keep_marker, content)
+    return _DB_TOKEN_RE.sub(r"\1<REDACTED>", content)
+
+
 def redact_sensitive_text(content: str) -> str:
     """Replace explicit credentials with a stable non-secret marker."""
     redacted = _PRIVATE_KEY_RE.sub("<REDACTED>", content)
@@ -70,7 +108,8 @@ def redact_sensitive_text(content: str) -> str:
         redacted,
     )
     redacted = _CLI_SECRET_RE.sub(lambda match: f"{match.group('prefix')}<REDACTED>", redacted)
-    return _PROVIDER_TOKEN_RE.sub("<REDACTED>", redacted)
+    redacted = _PROVIDER_TOKEN_RE.sub("<REDACTED>", redacted)
+    return _database_clean_pass(redacted)
 
 
 def sensitive_text_findings(content: str) -> dict[str, int]:
