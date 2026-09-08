@@ -20,6 +20,19 @@ All notable changes to this project are documented in this file. Format follows 
   session-end flush without any database or Bitwarden access.
 - `_PLAIN_SECRET_RE` ignores the `<REDACTED>` marker as a value so marker
   contexts stay accepted by `normalize_envelope`.
+- Analysis salvage: `_normalise_model_report` no longer discards a whole
+  conversation report because one claim cites a proof outside the supplied
+  evidence windows. Claims whose proof resolves are kept, the discarded count
+  is exposed as `dropped_claims` plus a `limitations` line, and the report is
+  rejected only when nothing verifiable remains. One bad citation used to
+  cost a full model call and hide every good finding of that conversation.
+- `ANALYSIS_BATCH_LIMIT` 1 → 6 conversations per daily analysis call, and the
+  native tick chains up to `DAILY_CONTINUATIONS_PER_TICK = 4` pending
+  continuations instead of one batch per 30-minute tick.
+- Native tick budgets: `AUTOMATION_COLLECT_LIMIT = 40` for model-free
+  discovery/parsing (285 sessions were `deferred` because each tick examined
+  only 4 candidates) and `AUTOMATION_PROCESS_LIMIT = 4` extractions per project
+  per tick now that a database call no longer costs a Bitwarden read.
 - Tests: `test_end_to_end_collect_process_writes_daily_before_db_ack`,
   `test_database_mode_keeps_extraction_after_db_ack`,
   `test_process_local_works_without_any_store`; hook command test expects

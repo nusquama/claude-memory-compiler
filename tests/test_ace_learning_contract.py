@@ -581,3 +581,46 @@ def test_diagnostics_hash_non_identifier_values() -> None:
     learning._validation_diagnostic(diagnostics, "incidents", 2, "unknown_evidence_ref", "arbitrary private prose")
     assert diagnostics[0]["ref"].startswith("sha256:")
     assert "arbitrary private prose" not in json.dumps(diagnostics)
+
+
+def test_report_keeps_verifiable_claims_and_drops_only_bad_citations() -> None:
+    """One bad citation must not discard three good findings."""
+    record = {
+        "source": "codex",
+        "session_id": "salvage",
+        "revision": "r",
+        "source_hash": "h",
+        "project_id": "p",
+        "_evidence": [
+            {"ref": "ev-a", "message_ids": ["m-a1", "m-a2"]},
+            {"ref": "ev-b", "message_ids": ["m-b1", "m-b2"]},
+        ],
+        "_completeness": {"source_available": True, "terminal_evidence": False, "observation": "partial"},
+    }
+    good_incident = {
+        "id": "inc-good",
+        "evidence_refs": ["ev-a"],
+        "message_ids": ["m-a1", "m-a2"],
+        "expected": "bounded result",
+        "observed": "partial result",
+        "recommendation": "inspect the final marker",
+        "test": "replay the bounded case",
+    }
+    bad_incident = {**good_incident, "id": "inc-bad", "evidence_refs": ["ev-zzz"], "message_ids": ["m-a1"]}
+    report = {
+        "conversations": [{"conversation_id": "codex:salvage", "status": "partial"}],
+        "incidents": [good_incident, bad_incident],
+        "observations": [{"message": "seen", "evidence_refs": ["ev-b"], "message_ids": ["m-b1", "m-b2"]}],
+        "recommendations": [],
+        "successes": [],
+        "limitations": [],
+    }
+    diagnostics: list[dict] = []
+    normalized = learning._normalise_model_report(report, record, diagnostics)
+    assert normalized is not None
+    assert [item["id"] for item in normalized["incidents"]] == ["inc-good"]
+    assert normalized["dropped_claims"] >= 1
+    assert any("écarté" in item for item in normalized["limitations"])
+
+    only_bad = {**report, "incidents": [bad_incident], "observations": []}
+    assert learning._normalise_model_report(only_bad, record) is None

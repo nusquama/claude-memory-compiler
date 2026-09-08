@@ -50,7 +50,10 @@ PIPELINE_VERSION = "ace-pipeline-v1"
 DEFAULT_LIMIT = 4
 # The native 30-minute pass is deliberately bounded to one revision per
 # project. Explicit/manual processing keeps the normal DEFAULT_LIMIT.
-AUTOMATION_PROCESS_LIMIT = 1
+AUTOMATION_PROCESS_LIMIT = 4
+# Metadata discovery and parsing never call a model: examine a wide lot per
+# tick so a deferred backlog drains within a few cycles instead of days.
+AUTOMATION_COLLECT_LIMIT = 40
 # Identity-only Supabase reads must stay below the wrapper's pipe limit.
 # Later ticks continue from the same bounded queue.
 REF_QUERY_PAGE_LIMIT = 64
@@ -63,7 +66,11 @@ ANALYSIS_MAX_NODES = 1000
 # Native analysis is deliberately one conversation per pass.  This keeps the
 # evidence window intact; unresolved snapshots remain pending for the next
 # scheduled pass instead of being compressed into one shared prompt.
-ANALYSIS_BATCH_LIMIT = 1
+# Conversations analysed per daily call. One call covers the batch; the
+# evidence budget per conversation is MAX_MODEL_CONTEXT_CHARS / batch.
+ANALYSIS_BATCH_LIMIT = 6
+# Continuations of the daily analysis attempted inside one native tick.
+DAILY_CONTINUATIONS_PER_TICK = 4
 DEFAULT_MAX_CONTEXT_CHARS = 120_000
 DEFAULT_MAX_HISTORY_CHARS = 8_000
 EXTRACTION_CURSOR_VERSION = 1
@@ -5237,7 +5244,11 @@ class ACEPipeline:
                 # service's working directory as an implicit project.
                 projects: list[Any] = self._processable_projects()
                 result["collect"] = self.collect(
-                    (), source=source, limit=limit, all_history=all_history, sync=False
+                    (),
+                    source=source,
+                    limit=max(limit, AUTOMATION_COLLECT_LIMIT),
+                    all_history=all_history,
+                    sync=False,
                 )
                 result["projects"] = len(projects)
                 result["sync"] = {"synced": 0, "failed": 0, "offline": False}
@@ -5265,6 +5276,18 @@ class ACEPipeline:
                     result["process"]["offline"] = result["process"]["offline"] or bool(process_result.get("offline"))
                     if daily_due:
                         daily_result = self.daily(project=project, now=local_now, _lock_held=True)
+                        # A day with more conversations than one analysis batch
+                        # reports ``pending``; continue a few times in the same
+                        # tick instead of waiting 30 minutes per batch.
+                        attempts = 1
+                        while (
+                            int(daily_result.get("pending", 0) or 0) > 0
+                            and int(daily_result.get("failed", 0) or 0) == 0
+                            and int(daily_result.get("analyzed", 0) or 0) == 0
+                            and attempts < DAILY_CONTINUATIONS_PER_TICK
+                        ):
+                            attempts += 1
+                            daily_result = self.daily(project=project, now=local_now, _lock_held=True)
                         result["daily"]["projects"] += 1
                         for key in ("days", "compiled", "analyzed", "failed", "pending"):
                             result["daily"][key] += int(daily_result.get(key, 0) or 0)

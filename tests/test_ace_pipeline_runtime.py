@@ -284,7 +284,10 @@ def test_historical_compile_does_not_replace_valid_target_no_evidence_report(tmp
     assert target_audit.read_text(encoding="utf-8") == before
 
 
-def test_pending_target_analysis_does_not_block_due_compile_backlog(tmp_path):
+def test_pending_target_analysis_does_not_block_due_compile_backlog(tmp_path, monkeypatch):
+    # The scenario needs a target day whose analysis stays pending after one
+    # batch: pin the batch to one snapshot while two remain for the day.
+    monkeypatch.setattr(pipeline, "ANALYSIS_BATCH_LIMIT", 1)
     runner, project, _transcripts, _outbox = _runner(tmp_path)
     historical = project.vault_dir / "daily" / "2026-09-04.md"
     historical.write_text("late historical daily", encoding="utf-8")

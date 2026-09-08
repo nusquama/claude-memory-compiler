@@ -2373,7 +2373,30 @@ def _normalise_model_report(report: Any, record: Mapping[str, Any], diagnostics:
     }
     normalized["evidence"] = list(evidence.values())
     if invalid_evidence_claim:
-        return None
+        # Salvage instead of discarding the whole report: every claim whose
+        # proof did not resolve has already been dropped above.  Keep the
+        # claims that do resolve, say how many were discarded, and reject only
+        # when nothing verifiable is left.  A rejected report costs a full
+        # model call and hides three good findings behind one bad citation.
+        kept = sum(
+            len(normalized.get(field) or [])
+            for field in ("incidents", "successes", "observations", "recommendations")
+        )
+        dropped = sum(
+            1
+            for item in (diagnostics or [])
+            if isinstance(item, Mapping) and item.get("claim_index") is not None
+        )
+        if kept == 0:
+            return None
+        limitations = normalized.get("limitations")
+        if not isinstance(limitations, list):
+            limitations = []
+        limitations.append(
+            f"{dropped or 'Des'} constat(s) écarté(s): preuve citée introuvable dans les fenêtres fournies."
+        )
+        normalized["limitations"] = limitations
+        normalized["dropped_claims"] = dropped
     guard_errors = _local_guard(normalized, record)
     if guard_errors:
         for error in guard_errors:
