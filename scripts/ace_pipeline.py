@@ -80,6 +80,21 @@ EXTRACTION_CURSOR_VERSION = 1
 DEFAULT_EXTRACTION_MODE = "local"
 PARIS = ZoneInfo("Europe/Paris")
 STAGES = ("collection", "sync", "extraction", "compile", "analysis")
+# Structural validation messages from ``compile.validate_knowledge_bundle``.
+# They carry knowledge-base slugs and file names only, never transcript or
+# prompt content, so they are preserved verbatim: without them a failed
+# compilation is reported as a generic "compiler error" and its real cause
+# stays invisible for days.
+_COMPILE_STRUCTURAL_DIAGNOSTIC = re.compile(
+    r"(?i)\b("
+    r"broken internal link|index link has no file|build log link has no file|"
+    r"article missing from index|link escapes knowledge root|"
+    r"knowledge index is (?:missing|unreadable)|knowledge build log is (?:missing|unreadable)|"
+    r"knowledge file escapes its root|symlinked knowledge file|knowledge file is unreadable|"
+    r"build log has no entry for|no article references|"
+    r"incomplete knowledge build"
+    r")\b[^;]*"
+)
 _COMPILE_DIAGNOSTIC_HINT = re.compile(
     r"(?i)(error|exception|traceback|failed|failure|missing|not found|no such file|"
     r"timeout|timed out|permission denied|unavailable|undefined|cannot)"
@@ -3960,7 +3975,17 @@ class ACEPipeline:
         details: list[str] = []
         for raw_line in candidates:
             line = _redact(" ".join(raw_line.split()))
-            if not line or not _COMPILE_DIAGNOSTIC_HINT.search(line):
+            if not line:
+                continue
+            structural = _COMPILE_STRUCTURAL_DIAGNOSTIC.findall(line)
+            if structural:
+                # Keep the exact structural reasons, bounded and de-duplicated.
+                for match in _COMPILE_STRUCTURAL_DIAGNOSTIC.finditer(line):
+                    detail = match.group(0).strip()[:200]
+                    if detail and detail not in details:
+                        details.append(detail)
+                continue
+            if not _COMPILE_DIAGNOSTIC_HINT.search(line):
                 continue
             # Preserve only exception classes and a few safe, actionable
             # identifiers.  This deliberately drops arbitrary line context,

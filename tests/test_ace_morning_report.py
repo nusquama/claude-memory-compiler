@@ -157,3 +157,25 @@ def test_health_section_is_quiet_when_state_is_clean(tmp_path: Path) -> None:
     _write(root / "projects.json", {"projects": {"p1": {"name": "alpha"}}})
     content = morning.build_report(root, "2026-09-08")
     assert "Aucune erreur de la chaîne détectée" in content
+
+
+def test_health_section_surfaces_the_compiler_reason(private_root: Path) -> None:
+    _write(
+        private_root / "compile.json",
+        {
+            "projects": {
+                "p1": {
+                    "days": {"2026-09-08": {"status": "failed", "error_type": "PipelineError"}},
+                    "diagnostics": {
+                        "2026-09-08": {
+                            "diagnostic": "incomplete knowledge build; broken internal link: concepts/gtm-x",
+                            "returncode": 1,
+                        }
+                    },
+                }
+            }
+        },
+    )
+    content = morning.build_report(private_root, "2026-09-08")
+    assert "Compilation alpha le 2026-09-08 : `failed` PipelineError." in content
+    assert "Motif : incomplete knowledge build; broken internal link: concepts/gtm-x" in content

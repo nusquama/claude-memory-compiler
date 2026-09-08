@@ -198,6 +198,14 @@ def _ace_health(private_root: Path, day: str, names: Mapping[str, str]) -> list[
                 lines.append(
                     f"- {label} {names.get(str(project_id), str(project_id))} le {day} : `{status or record.get('analysis_status')}` {reason}."
                 )
+                # The compiler stores its exact reason beside the day record.
+                # Surface it: a generic status hides a fixable knowledge-base
+                # defect, such as a broken link that blocks every compilation.
+                diagnostics = item.get("diagnostics") if isinstance(item, Mapping) else None
+                entry = diagnostics.get(day) if isinstance(diagnostics, Mapping) else None
+                detail = entry.get("diagnostic") if isinstance(entry, Mapping) else None
+                if detail:
+                    lines.append(f"    Motif : {_clip(detail, 240)}")
 
     # 5. Model reports rejected today.
     for project_id, name in names.items():

@@ -27,6 +27,13 @@ All notable changes to this project are documented in this file. Format follows 
   therefore never rejected by the database ("ACE message is not sanitized",
   "unsupported Unicode escape sequence"). Eight historical rows were
   re-sanitized in place and ingested.
+- `_safe_compile_diagnostic` keeps the compiler's structural validation
+  reasons verbatim (broken internal link, article missing from index, index
+  link has no file, …). They carry knowledge-base slugs only, never transcript
+  content. A failed compilation was previously reduced to "compiler error;
+  compiler unavailable", which hid a fixable knowledge-base defect for a full
+  day. The morning report's health section now prints that reason under the
+  failed compile/analysis line.
 - Morning report section 8 « Santé de ACE » (`_ace_health`): outbox rows not
   acknowledged with their error, collection read failures and unexamined
   backlog, failed transcripts by error type, failed morning cycle, pending
