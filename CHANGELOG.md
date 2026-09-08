@@ -27,6 +27,17 @@ All notable changes to this project are documented in this file. Format follows 
   therefore never rejected by the database ("ACE message is not sanitized",
   "unsupported Unicode escape sequence"). Eight historical rows were
   re-sanitized in place and ingested.
+- The morning analysis now starts from those signals instead of re-deriving
+  them: `daily` loads `private/ace/signals/<project>/<day>.jsonl`, groups the
+  rows by session, and `audit_snapshots(..., capture_signals=...)` attaches
+  them to each record as `_capture_signals`. `build_snapshot_prompt` renders a
+  `SIGNAUX OBSERVÉS À LA CAPTURE` block per conversation and the instructions
+  tell the model to treat each one, keep its signature verbatim so occurrence
+  counters stay stable, and focus on cause, correction and test. A signal is
+  explicitly not a proof: every claim still cites evidence refs that resolve in
+  the supplied windows, a window that contradicts a signal wins, and an
+  incident established only by the windows is still accepted. The keyword is
+  passed only when the installed learning module accepts it.
 - Improvement signals are now produced by the extraction stage, while it holds
   the raw transcript. `flush.py` appends a bounded `<<<ACE_SIGNAUX>>>` JSON
   block after the daily body (single-pass, partial and consolidation prompts);

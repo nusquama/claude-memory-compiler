@@ -636,3 +636,47 @@ def test_inline_signature_priority_risk_are_lifted_out_of_text() -> None:
     assert claim["signature"] == "tache declaree terminee"
     assert claim["priority"] == "high"
     assert claim["risk"] == "low"
+
+
+def test_capture_signals_reach_the_analysis_prompt() -> None:
+    """The morning analysis must start from what extraction saw, verbatim."""
+    record = {
+        "source": "claude",
+        "session_id": "s-1",
+        "revision": "r",
+        "source_hash": "h",
+        "project_id": "p",
+        "_evidence": [{"ref": "ev-a", "message_ids": ["m-a1"]}],
+        "_completeness": {"source_available": True, "terminal_evidence": False, "observation": "partial"},
+        "_capture_signals": [
+            {
+                "type": "frustration",
+                "signature": "tache declaree terminee",
+                "message_ids": ["m-a1"],
+                "quote": "putain ça marche toujours pas",
+                "observed": "l'agent a déclaré la tâche finie",
+            }
+        ],
+    }
+    prompt = learning.build_snapshot_prompt([record])
+    assert "SIGNAUX OBSERVÉS À LA CAPTURE" in prompt
+    assert "putain ça marche toujours pas" in prompt
+    assert "tache declaree terminee" in prompt
+    assert "pars de ces signaux" in prompt
+    assert "Un signal n'est pas une preuve" in prompt
+
+
+def test_prompt_without_capture_signals_has_no_empty_block() -> None:
+    record = {
+        "source": "claude",
+        "session_id": "s-2",
+        "revision": "r",
+        "source_hash": "h",
+        "project_id": "p",
+        "_evidence": [{"ref": "ev-a", "message_ids": ["m-a1"]}],
+        "_completeness": {"source_available": True, "terminal_evidence": False, "observation": "partial"},
+    }
+    prompt = learning.build_snapshot_prompt([record])
+    # The instructions always mention the block; only the per-conversation
+    # block itself must be absent when nothing was captured.
+    assert "SIGNAUX OBSERVÉS À LA CAPTURE (point de départ, non probants):" not in prompt

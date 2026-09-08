@@ -1102,3 +1102,26 @@ def test_extraction_splits_signals_from_the_daily_body(tmp_path):
     assert rows[0]["type"] == "frustration"
     assert rows[0]["quote"] == "putain ça marche pas"
     assert rows[0]["signature"] == "capture en echec"
+
+
+def test_capture_signals_are_passed_to_the_daily_analysis(tmp_path):
+    runner, project, _projects, _transcripts, _outbox = make_pipeline(tmp_path)
+    directory = runner.private_root / "signals" / project.project_id
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"session_id": "s-1", "type": "frustration", "signature": "sig-a",
+         "message_ids": ["m1"], "quote": "putain", "observed": "annonce sans preuve"},
+        {"session_id": "s-1", "type": "frustration", "signature": "sig-a",
+         "message_ids": ["m1"], "quote": "putain", "observed": "annonce sans preuve"},
+        {"session_id": "s-2", "type": "tool_error", "signature": "sig-b", "message_ids": ["m2"]},
+        {"session_id": "", "type": "frustration", "signature": "orpheline"},
+    ]
+    (directory / "2026-09-08.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8"
+    )
+    loaded = runner._capture_signals_for(project, "2026-09-08")
+    assert set(loaded) == {"s-1", "s-2"}
+    assert len(loaded["s-1"]) == 1
+    assert loaded["s-1"][0]["quote"] == "putain"
+    assert loaded["s-2"][0]["type"] == "tool_error"
+    assert runner._capture_signals_for(project, "2026-09-07") == {}

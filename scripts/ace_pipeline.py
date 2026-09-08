@@ -3791,6 +3791,58 @@ class ACEPipeline:
         return recorded
 
     @staticmethod
+    def _accepts_keyword(function: Any, name: str) -> bool:
+        """Whether ``function`` accepts ``name``, directly or through kwargs."""
+        try:
+            parameters = inspect.signature(function).parameters
+        except (TypeError, ValueError):
+            return False
+        if name in parameters:
+            return True
+        return any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+    def _capture_signals_for(self, project: Any, day: str) -> dict[str, list[dict[str, Any]]]:
+        """Load the signals the extractor observed for one project and day.
+
+        Keyed by session id so the morning analysis starts from what was seen
+        on the raw transcript instead of re-deriving it from the evidence
+        windows alone.
+        """
+        project_id = _project_id(project) if project is not None else ""
+        path = self.private_root / "signals" / (project_id or "unknown") / f"{day}.jsonl"
+        if not path.exists():
+            return {}
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, Mapping) or not row.get("type"):
+                    continue
+                session_id = str(row.get("session_id") or "")
+                if not session_id:
+                    continue
+                entry = {
+                    key: row.get(key)
+                    for key in ("type", "signature", "message_ids", "quote", "observed")
+                    if row.get(key)
+                }
+                bucket = grouped.setdefault(session_id, [])
+                if entry not in bucket:
+                    bucket.append(entry)
+        except OSError:
+            return {}
+        return grouped
+
+    @staticmethod
     def _extraction_mode() -> str:
         value = os.environ.get("ACE_EXTRACTION_MODE", DEFAULT_EXTRACTION_MODE).strip().lower()
         return value if value in {"local", "database"} else DEFAULT_EXTRACTION_MODE
@@ -4690,12 +4742,18 @@ class ACEPipeline:
         elif learning is not None and hasattr(learning, "audit_snapshots_sync"):
             runner = self._default_analysis_runner(project)
             try:
+                analysis_kwargs: dict[str, Any] = {
+                    "store": store,
+                    "state_dir": analysis_state_dir,
+                    "audit_runner": runner,
+                    "now": self.now(),
+                }
+                signals = self._capture_signals_for(project, day)
+                if signals and self._accepts_keyword(learning.audit_snapshots_sync, "capture_signals"):
+                    analysis_kwargs["capture_signals"] = signals
                 payload = learning.audit_snapshots_sync(
                     [self._snapshot_payload(item) for item in snapshots],
-                    store=store,
-                    state_dir=analysis_state_dir,
-                    audit_runner=runner,
-                    now=self.now(),
+                    **analysis_kwargs,
                 )
             except Exception:
                 release_analysis_claims()

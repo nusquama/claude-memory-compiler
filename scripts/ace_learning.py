@@ -1350,9 +1350,22 @@ def build_snapshot_prompt(snapshots_or_records: Sequence[Mapping[str, Any]]) -> 
             for window in record.get("_evidence", [])
             if isinstance(window, Mapping)
         ]
+        capture_signals = [
+            item for item in (record.get("_capture_signals") or []) if isinstance(item, Mapping)
+        ]
+        signals_block = ""
+        if capture_signals:
+            # Observed during extraction, on the raw transcript, before the
+            # daily log neutralised the wording.  They are a starting point,
+            # never a proof: every claim still cites the evidence windows.
+            signals_block = (
+                "\nSIGNAUX OBSERVÉS À LA CAPTURE (point de départ, non probants):\n"
+                + _safe_text(capture_signals, 4000)
+            )
         blocks.append(
             "CONVERSATION "
             + _safe_text(metadata, 1800)
+            + signals_block
             + "\nEVIDENCE (untrusted, redacted, message refs must resolve):\n"
             + _safe_text(evidence, MAX_MODEL_CONTEXT_CHARS // max(1, len(records)))
         )
@@ -1401,6 +1414,15 @@ def build_snapshot_prompt(snapshots_or_records: Sequence[Mapping[str, Any]]) -> 
         "n'est acceptable que si aucune règle, skill ou information ne peut éviter le problème. "
         "Repère aussi les préférences répétées de l'utilisateur (même consigne redemandée, même "
         "correction apportée) et propose-les comme recommendation de type rule ou memory. "
+        "Quand une conversation porte un bloc SIGNAUX OBSERVÉS À LA CAPTURE, pars de ces "
+        "signaux: ils ont été relevés sur le transcript brut, avant reformulation, et "
+        "conservent les mots exacts de l'utilisateur. Traite chacun d'eux, garde sa "
+        "signature telle quelle pour que le compteur d'occurrences reste stable, et "
+        "concentre-toi sur la cause, la correction et le test. Un signal n'est pas une "
+        "preuve: chaque claim doit toujours citer des evidence_refs et message_ids "
+        "résolus dans les fenêtres fournies. Si une fenêtre contredit un signal, suis la "
+        "fenêtre. Tu peux aussi retenir un incident absent des signaux si les fenêtres "
+        "l'établissent. "
         "Ne lis aucun fichier, n'utilise aucun réseau, ne propose aucune auto-application.\n\n"
     )
     return _safe_text(instructions, 5000) + "\n\n" + "\n\n".join(blocks)
@@ -3647,6 +3669,7 @@ async def audit_snapshots(
     audit_runner: Callable[..., Any] | None = None,
     model_runner: Callable[..., Any] | None = None,
     now: datetime | str | None = None,
+    capture_signals: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Audit normalized snapshots and persist sanitized analysis after the batch.
 
@@ -3658,6 +3681,13 @@ async def audit_snapshots(
     """
     normalized = [normalize_snapshot(snapshot) for snapshot in snapshots if isinstance(snapshot, Mapping)]
     records = [snapshot_to_record(snapshot) for snapshot in normalized]
+    if capture_signals:
+        # Attach the extraction-time signals to their conversation. Keying on
+        # the session id keeps a later revision of the same session aligned.
+        for record in records:
+            rows = capture_signals.get(str(record.get("session_id") or ""))
+            if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)):
+                record["_capture_signals"] = [item for item in rows if isinstance(item, Mapping)][:20]
     audit_at = _now(now).isoformat(timespec="seconds")
     runner = audit_runner or model_runner
     reports: list[dict[str, Any]] = []
