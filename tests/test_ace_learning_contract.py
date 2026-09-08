@@ -624,3 +624,15 @@ def test_report_keeps_verifiable_claims_and_drops_only_bad_citations() -> None:
 
     only_bad = {**report, "incidents": [bad_incident], "observations": []}
     assert learning._normalise_model_report(only_bad, record) is None
+
+
+def test_inline_signature_priority_risk_are_lifted_out_of_text() -> None:
+    claim = {
+        "test": "Vérifier le rapport.|signature=tache declaree terminee|priority=high|risk=low",
+        "priority": "",
+    }
+    learning._lift_inline_fields(claim)
+    assert claim["test"] == "Vérifier le rapport."
+    assert claim["signature"] == "tache declaree terminee"
+    assert claim["priority"] == "high"
+    assert claim["risk"] == "low"

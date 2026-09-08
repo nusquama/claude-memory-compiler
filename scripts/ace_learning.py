@@ -1381,7 +1381,8 @@ def build_snapshot_prompt(snapshots_or_records: Sequence[Mapping[str, Any]]) -> 
         "Si completeness.terminal_evidence est faux, ne revendique jamais un succès terminal; "
         "une erreur ou une frustration prouvée reste toutefois une observation valide. "
         "Chaque incident doit aussi fournir expected, observed, recommendation et test. "
-        "Chaque incident et chaque recommendation portent aussi signature, priority et risk. "
+        "Chaque incident et chaque recommendation portent aussi les champs JSON signature, priority "
+        "et risk, au même niveau que type et text; ne les écris jamais à l'intérieur d'un texte. "
         "signature est un libellé court et stable du problème, réutilisable d'une session à "
         "l'autre (exemple: 'mauvais profil Chrome', 'tache declaree terminee sans verification'); "
         "deux occurrences du même problème doivent recevoir la même signature. "
@@ -2116,6 +2117,30 @@ def _complete_model_incident_details(incident: dict[str, Any]) -> bool:
     return True
 
 
+_INLINE_FIELD_RE = re.compile(r"\s*\|\s*(signature|priority|risk)\s*=\s*([^|]+?)\s*(?=\||$)")
+
+
+def _lift_inline_fields(claim: dict[str, Any]) -> None:
+    """Move ``|signature=…|priority=…|risk=…`` suffixes out of text fields.
+
+    A model sometimes appends the requested fields to a sentence instead of
+    emitting them as JSON keys. Lift them into the claim when the key is
+    missing, then strip the suffix so the text stays readable.
+    """
+    for field in ("test", "recommendation", "text", "observed", "expected", "message"):
+        value = claim.get(field)
+        if not isinstance(value, str) or "|" not in value:
+            continue
+        matches = list(_INLINE_FIELD_RE.finditer(value))
+        if not matches:
+            continue
+        for match in matches:
+            key, raw = match.group(1), match.group(2).strip()
+            if raw and not str(claim.get(key) or "").strip():
+                claim[key] = raw
+        claim[field] = _INLINE_FIELD_RE.sub("", value).rstrip(" |").strip()
+
+
 def _normalise_model_report(report: Any, record: Mapping[str, Any], diagnostics: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     def reject(field: str, reason: str):
         _validation_diagnostic(diagnostics, field, None, reason)
@@ -2227,6 +2252,7 @@ def _normalise_model_report(report: Any, record: Mapping[str, Any], diagnostics:
         if not _complete_model_incident_details(incident):
             invalid_evidence_claim = True
             continue
+        _lift_inline_fields(incident)
         incident.setdefault("scope", record.get("project_id") or "global")
         incident.setdefault("signature", incident.get("type"))
         incident.setdefault("priority", "normal")
@@ -2331,6 +2357,7 @@ def _normalise_model_report(report: Any, record: Mapping[str, Any], diagnostics:
             if not isinstance(item, Mapping):
                 continue
             candidate = dict(item)
+            _lift_inline_fields(candidate)
             refs, message_ids, invalid = _normalise_claim_evidence(candidate, record, diagnostics, field=field, claim_index=claim_index)
             if invalid:
                 invalid_evidence_claim = True
