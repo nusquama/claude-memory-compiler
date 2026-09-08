@@ -1349,6 +1349,7 @@ class ACEPipeline:
         sync: bool = False,
         extract: bool = False,
         since: float | None = None,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         # Native scheduling invokes ``collect --sync`` without a project path.
         # Enumerate only explicitly registered projects and run the same
@@ -1392,8 +1393,11 @@ class ACEPipeline:
                     sync=sync,
                     extract=extract,
                     since=since,
+                    dry_run=dry_run,
                 )
                 aggregate["projects"] += 1
+                if dry_run:
+                    aggregate.setdefault("would_queue", []).extend(result.get("would_queue", []))
                 for key in ("queued", "unchanged", "failed", "deferred", "unexamined"):
                     aggregate[key] += int(result.get(key, 0) or 0)
                 aggregate["offline"] = aggregate["offline"] or bool(result.get("offline"))
@@ -1407,6 +1411,26 @@ class ACEPipeline:
         # interrupted tick expensive and non-resumable.
         metadata_candidates = self._source_paths(source_paths, all_history, days, since)
         metadata_candidates = self._fair_order(metadata_candidates, state)
+        if dry_run:
+            # Preview only: list what a real run would examine for this
+            # project. No parse, no queue, no cursor, no state write.
+            selected = metadata_candidates if limit < 0 else metadata_candidates[:limit]
+            return {
+                "dry_run": True,
+                "project": _project_name(project),
+                "candidates": len(metadata_candidates),
+                "would_examine": len(selected),
+                "would_queue": [
+                    str(self._candidate_path(item) or _first_attr(item, ("snapshot_id", "id"), ""))
+                    for item in selected
+                ][:200],
+                "queued": 0,
+                "unchanged": 0,
+                "failed": 0,
+                "deferred": 0,
+                "unexamined": len(metadata_candidates) - len(selected),
+                "offline": False,
+            }
         if limit >= 0:
             selected_metadata = metadata_candidates[:limit]
             deferred_metadata = metadata_candidates[limit:]
@@ -5348,6 +5372,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     collect.add_argument("--days", type=int, default=7)
     collect.add_argument("--since", help="only transcripts modified since YYYY-MM-DD (explicit history bound)")
+    collect.add_argument("--dry-run", action="store_true", help="preview routing; no queue, no cursor, no state write")
     collect.add_argument("--all-history", action="store_true")
     collect.add_argument("--sync", action="store_true")
     collect.add_argument("--extract", action="store_true", help="write daily logs locally right after capture")
@@ -5384,6 +5409,10 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--query", required=True)
     history.add_argument("--limit", type=int, default=10)
     history.add_argument("--max-chars", type=int, default=DEFAULT_MAX_HISTORY_CHARS)
+
+    lint_parser = sub.add_parser("lint", help="explicitly delegate the knowledge base health checks")
+    lint_parser.add_argument("--cwd")
+    lint_parser.add_argument("--structural-only", action="store_true", help="skip the LLM contradiction check")
 
     compile_parser = sub.add_parser("compile", help="explicitly delegate the existing compiler")
     compile_parser.add_argument("--cwd", required=True)
@@ -5460,7 +5489,7 @@ def dispatch(args: argparse.Namespace, pipeline: ACEPipeline) -> dict[str, Any]:
         since = None
         if args.since:
             since = datetime.combine(date.fromisoformat(args.since), datetime.min.time(), tzinfo=PARIS).timestamp()
-        return pipeline.collect(paths, cwd=args.cwd, source=args.source, host_id=args.host_id, limit=args.limit, days=args.days, all_history=args.all_history or since is not None, sync=args.sync, extract=args.extract, since=since)
+        return pipeline.collect(paths, cwd=args.cwd, source=args.source, host_id=args.host_id, limit=args.limit, days=args.days, all_history=args.all_history or since is not None, sync=args.sync, extract=args.extract, since=since, dry_run=args.dry_run)
     if command == "sync":
         return pipeline.sync(cwd=args.cwd, limit=args.limit)
     if command == "process":
@@ -5486,6 +5515,8 @@ def dispatch(args: argparse.Namespace, pipeline: ACEPipeline) -> dict[str, Any]:
         return pipeline._delegate("compile", args.cwd, flags)
     if command == "query":
         return pipeline._delegate("query", args.cwd, [args.question])
+    if command == "lint":
+        return pipeline._delegate("lint", args.cwd, ["--structural-only"] if args.structural_only else [])
     if command == "scan-md":
         flags = []
         if args.all:

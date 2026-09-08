@@ -27,6 +27,9 @@ All notable changes to this project are documented in this file. Format follows 
   therefore never rejected by the database ("ACE message is not sanitized",
   "unsupported Unicode escape sequence"). Eight historical rows were
   re-sanitized in place and ingested.
+- `ace lint [--structural-only]` delegates `scripts/lint.py` under the shared
+  tick lock; `ace collect --dry-run` previews routing per project (`would_queue`)
+  without parse, queue, cursor or state write. Both existed in CMC.
 - `ace collect --since YYYY-MM-DD`: explicit date bound for a historical
   replay, replacing both the activation cutoff and `--days`; implies
   `--all-history` for that window. Restores the `backfill_codex.py --since`

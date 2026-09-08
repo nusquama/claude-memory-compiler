@@ -1057,3 +1057,16 @@ def test_daily_audit_exposes_measured_extraction_and_compile_usage(tmp_path):
     assert payload["stage_usage"]["extraction"]["call_count"] == 2
     assert payload["stage_usage"]["compile"]["token_usage"]["output_tokens"] == 2
     assert payload["stage_metrics"] == payload["stage_usage"]
+
+
+def test_collect_dry_run_queues_nothing_and_lists_candidates(tmp_path):
+    source = tmp_path / "source.jsonl"
+    source.write_text("**User:** preview only", encoding="utf-8")
+    runner, project, _projects, transcripts, outbox = make_pipeline(tmp_path)
+    result = runner.collect([source], cwd=project.root, source="test", dry_run=True)
+    assert result["dry_run"] is True
+    assert result["would_examine"] == 1
+    assert result["would_queue"] == [str(source)]
+    assert outbox.items == []
+    assert transcripts.parse_calls == 0
+    assert runner.state.read("collection") == {}
