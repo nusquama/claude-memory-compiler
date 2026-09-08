@@ -152,13 +152,8 @@ def build_context() -> str:
 
 
 def main():
-    # Safety net: catch any native compact summaries the PreCompact hook
-    # missed (the summary often lands in the JSONL AFTER PreCompact runs).
-    # This consumes stdin, so it must run before anything else that needs it.
-    try:
-        maybe_extract_native_summaries()
-    except Exception:
-        pass
+    # SessionStart only reads compiled context. All transcript ingestion and
+    # daily writes go through the durable ACE queue and database ACK.
 
     context = build_context()
 

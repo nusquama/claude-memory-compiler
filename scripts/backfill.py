@@ -31,7 +31,7 @@ from config import (
 
 # Honour the same window settings as the SessionEnd / PreCompact hooks so
 # manual backfills capture the same depth of context. Override-friendly
-# via the `CMC_*` env vars defined in config.py.
+# via the `ACE_*` env vars defined in config.py.
 MAX_TURNS = FLUSH_MAX_TURNS
 MAX_CONTEXT_CHARS = FLUSH_MAX_CHARS
 MIN_TURNS_TO_FLUSH = 2
@@ -179,13 +179,13 @@ def _run_flush(session_id: str, context_file: Path, flush_script: Path, parallel
         str(context_file), session_id,
     ]
     flush_env = os.environ.copy()
-    flush_env.setdefault("CMC_FLUSH_MAX_RETRIES", "1")
-    flush_env.setdefault("CMC_FLUSH_ATTEMPT_TIMEOUT", "90")
+    flush_env.setdefault("ACE_FLUSH_MAX_RETRIES", "1")
+    flush_env.setdefault("ACE_FLUSH_ATTEMPT_TIMEOUT", "90")
     if parallel_mode:
         # Caller (backfill) is managing concurrency itself — bypass the
         # vault-wide lock. Each pool worker still spawns its own flush.py
         # subprocess; serialising via the lock would defeat the parallelism.
-        flush_env["CMC_FLUSH_SKIP_LOCK"] = "1"
+        flush_env["ACE_FLUSH_SKIP_LOCK"] = "1"
     result = subprocess.run(cmd, capture_output=True, text=True, env=flush_env)
     return result.returncode, result.stderr
 

@@ -4,7 +4,7 @@ project's daily log.
 
 A second ingestion source for the knowledge base, alongside session
 transcripts. Walks the repo's *.md files, filters by date / hash dedup,
-asks Haiku to summarise each one, then appends the result to today's
+asks Codex Luna Medium to summarise each one, then appends the result to today's
 daily log under a `### MD Scan: <path> (HH:MM)` section. The existing
 compile.py pipeline picks it up from there.
 
@@ -14,13 +14,14 @@ Usage:
     uv run python scripts/scan_md.py --days 7           # files modified in last 7 days
     uv run python scripts/scan_md.py --since 2026-04-01 # files modified since date
     uv run python scripts/scan_md.py --all              # ignore hash dedup
-    uv run python scripts/scan_md.py --path /repo       # override repo root
+    uv run python scripts/scan_md.py --cwd /repo        # source checkout to scan
+    uv run python scripts/scan_md.py --path /repo       # override repo root (legacy alias)
     uv run python scripts/scan_md.py --dry-run          # preview, no LLM calls
 """
 
 from __future__ import annotations
 
-# Recursion prevention: set BEFORE any import that might trigger Claude
+# Recursion prevention: set BEFORE any import that might trigger another ACE child
 import os
 os.environ.setdefault("CLAUDE_INVOKED_BY", "scan_md")
 
@@ -35,13 +36,13 @@ from pathlib import Path
 from config import (
     DAILY_DIR,
     PROJECT_DIR,
-    SCAN_MODEL,
     STATE_DIR,
     TOOL_DIR as ROOT,
     VAULT_ROOT,
     now_iso,
 )
-from utils import file_hash, load_state, save_state
+from codex_runner import run_codex
+from utils import file_hash, load_state, redact_sensitive_text, save_state
 
 # Reuse the daily-log writer, lock, and retry policy from flush.py rather
 # than duplicate them. flush.py is import-safe (its main() is gated under
@@ -102,21 +103,25 @@ EXCLUDED_DIR_SEGMENTS = {
 }
 
 MAX_FILE_BYTES = 100 * 1024  # 100 KB; truncate longer files (keep head)
-ATTEMPT_TIMEOUT = max(30, int(os.environ.get("CMC_SCAN_ATTEMPT_TIMEOUT", "120")))
+ATTEMPT_TIMEOUT = max(30, int(os.environ.get("ACE_SCAN_ATTEMPT_TIMEOUT", "120")))
 
 
-def find_repo_root(override: str | None) -> Path | None:
+def find_repo_root(override: str | None, cwd: str | None = None) -> Path | None:
     """Resolve the git repo root. Refuse the vault itself as a target.
 
     Cascade for the search starting point:
         1. --path argument (resolved as-is, no git lookup needed)
-        2. $CLAUDE_PROJECT_DIR (set by Claude Code when launching hooks)
-        3. $PWD (preserved by the shell across `uv run --directory`)
-        4. os.getcwd()
+        2. --cwd argument (the explicit source checkout selected by ACE)
+        3. $ACE_PROJECT_CWD (an explicit source checkout from a caller)
+        4. $CLAUDE_PROJECT_DIR (legacy hook context)
+        5. $PWD (preserved by the shell across `uv run --directory`)
+        6. os.getcwd()
 
     The fallbacks matter because the typical UX is `uv run --directory _config
     python scripts/scan_md.py`, which changes cwd to _config before Python
-    starts — `Path.cwd()` alone would always return the vault.
+    starts — `Path.cwd()` alone would always return the vault.  ``ACE_PROJECT_DIR``
+    intentionally is not used here: it identifies the destination knowledge
+    directory, while ``--cwd`` identifies the source checkout to scan.
     """
     if override:
         candidate = Path(override).resolve()
@@ -126,7 +131,9 @@ def find_repo_root(override: str | None) -> Path | None:
         return candidate
 
     start = (
-        os.environ.get("CLAUDE_PROJECT_DIR")
+        cwd
+        or os.environ.get("ACE_PROJECT_CWD")
+        or os.environ.get("CLAUDE_PROJECT_DIR")
         or os.environ.get("PWD")
         or str(Path.cwd())
     )
@@ -249,16 +256,11 @@ TYPE_POLICIES = {
 
 
 async def summarise_file(rel: str, mtime_iso: str, content: str, file_type: str) -> tuple[str, list[str]]:
-    """Call Haiku to summarise a single .md file. Returns (text, stderr_lines).
-    Mirrors flush.run_flush retry/transient logic."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
+    """Call Codex Luna Medium to summarise a single .md file.
 
+    Returns (text, stderr_lines).
+    Mirrors flush.run_flush retry/transient logic."""
+    content = redact_sensitive_text(content)
     if len(content.encode("utf-8")) > MAX_FILE_BYTES:
         # Keep the head — title, intro, key sections usually live there.
         # Encode/decode to avoid splitting a multi-byte char.
@@ -269,7 +271,7 @@ async def summarise_file(rel: str, mtime_iso: str, content: str, file_type: str)
     type_policy = TYPE_POLICIES.get(file_type, TYPE_POLICIES["doc"])
 
     prompt = f"""Tu extrais d'un fichier Markdown TOUT ce qu'il contient comme atomes
-d'information distincts. Le résultat alimente `compile.py` (Sonnet aval)
+d'information distincts. Le résultat alimente `compile.py` (Codex Luna Medium aval)
 qui croise toutes les sources, déduplique, et structure en concept articles.
 
 **Tu es un EXTRACTEUR, pas un CURATEUR.** À ton étage, le job est de NE
@@ -388,12 +390,6 @@ Dernière modification: {mtime_iso}
 
     captured: list[str] = []
 
-    def stderr_callback(line: str) -> None:
-        text = line.rstrip()
-        if text:
-            captured.append(text)
-            logging.warning("[bundled CLI] %s", text)
-
     last_exc: Exception | None = None
     response = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -402,38 +398,26 @@ Dernière modification: {mtime_iso}
             logging.info("Retry attempt %d/%d after %ds", attempt, MAX_ATTEMPTS, delay)
             await asyncio.sleep(delay)
 
-        attempt_stderr_start = len(captured)
-
-        async def _run_query() -> str:
-            local = ""
-            async for message in query(
-                prompt=prompt,
-                options=ClaudeAgentOptions(
-                    cwd=str(ROOT),
-                    model=SCAN_MODEL,
-                    allowed_tools=[],
-                    max_turns=2,
-                    stderr=stderr_callback,
-                ),
-            ):
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            local += block.text
-                elif isinstance(message, ResultMessage):
-                    pass
-            return local
-
         try:
-            response = await asyncio.wait_for(_run_query(), timeout=ATTEMPT_TIMEOUT)
+            response, stderr_lines = await run_codex(
+                prompt,
+                cwd=VAULT_ROOT,
+                sandbox="read-only",
+                timeout=ATTEMPT_TIMEOUT,
+            )
+            captured.extend(stderr_lines)
             return response, captured
         except asyncio.TimeoutError:
             last_exc = TimeoutError(f"bundled CLI hung for >{ATTEMPT_TIMEOUT}s")
             logging.warning("Attempt %d/%d timed out", attempt, MAX_ATTEMPTS)
             continue
+        except TimeoutError as e:
+            last_exc = e
+            logging.warning("Attempt %d/%d timed out", attempt, MAX_ATTEMPTS)
+            continue
         except Exception as e:
             last_exc = e
-            this_stderr = "\n".join(captured[attempt_stderr_start:])
+            this_stderr = "\n".join(captured)
             logging.warning("Attempt %d/%d failed: %s", attempt, MAX_ATTEMPTS, e)
             if not _is_transient_error(e, this_stderr):
                 logging.info("Non-transient error — aborting retries")
@@ -505,7 +489,7 @@ def run_menu() -> argparse.Namespace:
     the user picks an option that sets it.
     """
     ns = argparse.Namespace(
-        init=False, all=False, days=None, since=None, path=None, dry_run=False,
+        init=False, all=False, days=None, since=None, path=None, cwd=None, dry_run=False,
     )
     print(MENU_TEXT)
     while True:
@@ -562,6 +546,11 @@ def main() -> int:
     parser.add_argument("--days", type=int, help="Only scan files modified in the last N days (by mtime)")
     parser.add_argument("--since", type=str, help="Only scan files modified on/after YYYY-MM-DD (by mtime)")
     parser.add_argument("--path", type=str, help="Override repo root (default: git rev-parse --show-toplevel)")
+    parser.add_argument(
+        "--cwd",
+        type=str,
+        help="Explicit source checkout to scan (takes precedence over hook and shell cwd)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="List files that would be scanned, no LLM calls")
     args = parser.parse_args()
 
@@ -569,8 +558,10 @@ def main() -> int:
     # (incremental scan) so cron jobs and CI runs aren't broken.
     if args.menu:
         path_keep = args.path  # path is environmental, preserved across menu
+        cwd_keep = args.cwd
         args = run_menu()
         args.path = path_keep
+        args.cwd = cwd_keep
 
     # File-based logging — same channel as flush.py for consistency.
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -581,7 +572,7 @@ def main() -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    root = find_repo_root(args.path)
+    root = find_repo_root(args.path, args.cwd)
     if root is None:
         print("error: could not resolve a git repo root. Pass --path explicitly.", file=sys.stderr)
         return 1

@@ -1,174 +1,194 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This checkout contains the Agent Continuous Evolution (ACE) runtime.
+It provides two functions: project memory and evidence-based agent improvement.
 
-## What This Is
+The canonical entry point is `/Users/franck/.agents/bin/ace`.
+The complete process is documented in the
+[canonical ACE process](/Users/franck/.agents/docs/ace/processus-ace.md).
+The article editing contract remains in [AGENTS.md](AGENTS.md).
 
-Claude Memory Compiler (CMC) — a personal knowledge base that automatically captures Claude Code conversations and compiles them into structured wiki articles. Raw material flows: conversation transcript → daily log → compiled concepts/connections → injected back into future sessions.
-
-## Quick Access — Slash Commands in Claude Code
-
-The primary entry points are slash commands invoked from inside a Claude Code session. They auto-resolve the current project (`git rev-parse --show-toplevel`), export `CLAUDE_PROJECT_DIR`, and dispatch to the right underlying script.
-
-| Slash command | Purpose |
-|---|---|
-| `/cmc` | Top-level menu — picks among all CMC operations |
-| `/cmc-init` | Initialise the KB for the current project (one-time) |
-| `/cmc-scan` | Backfill past Claude Code transcripts into daily logs |
-| `/cmc-scan-md` | Scan the `.md` files of the current repo (READMEs, docs, ADRs) |
-| `/cmc-compile` | Compile daily logs → knowledge articles |
-| `/cmc-query` | Ask a question against the KB |
-
-For `/cmc-scan-md`, natural-language invocations work: "scan md des 7 derniers jours", "rescanne les md depuis le début", "scan les docs", "scan markdown depuis 2026-04-01". The skill parses the date filter and the rescan mode from the user's wording.
-
-## Key Commands (terminal, manual invocation)
+## Main commands
 
 ```bash
-# Compile daily logs into knowledge articles (only changed files)
-uv run python scripts/compile.py
+# Read-only checks
+/Users/franck/.agents/bin/ace status
+/Users/franck/.agents/bin/ace schedule plan --json
+/Users/franck/.agents/bin/ace schedule status --json
 
-# Force recompile everything
-uv run python scripts/compile.py --all
+# Bounded pipeline
+/Users/franck/.agents/bin/ace init --cwd /path/to/project
+/Users/franck/.agents/bin/ace collect --cwd /path/to/project
+/Users/franck/.agents/bin/ace sync --cwd /path/to/project
+/Users/franck/.agents/bin/ace process --cwd /path/to/project
+/Users/franck/.agents/bin/ace daily --cwd /path/to/project
+/Users/franck/.agents/bin/ace tick
 
-# Compile a specific daily log
-uv run python scripts/compile.py --file daily/2026-04-01.md
-
-# Query the knowledge base
-uv run python scripts/query.py "your question here"
-
-# Query and file the answer back as a qa/ article
-uv run python scripts/query.py "your question" --file-back
-
-# Health checks (broken links, orphans, stale articles, contradictions)
-uv run python scripts/lint.py
-
-# Skip LLM-powered checks (free, structural only)
-uv run python scripts/lint.py --structural-only
-
-# Backfill historical transcripts
-uv run python scripts/backfill.py
-
-# Scan the .md files of the current git repo into today's daily log
-uv run python scripts/scan_md.py --menu             # interactive menu (recommended)
-uv run python scripts/scan_md.py                    # changed since last scan
-uv run python scripts/scan_md.py --init             # full rescan from scratch
-uv run python scripts/scan_md.py --days 7           # files modified in last 7 days
-uv run python scripts/scan_md.py --since 2026-04-01 # files modified since date
-uv run python scripts/scan_md.py --all              # ignore hash dedup
-uv run python scripts/scan_md.py --dry-run          # preview without LLM calls
-
-# Backfill Codex Desktop/CLI conversations from ~/.codex/sessions
-uv run python scripts/backfill_codex.py --dry-run --fallback-project Conversations
-uv run python scripts/backfill_codex.py --fallback-project Conversations --compile
+# Explicit retained delegations
+/Users/franck/.agents/bin/ace compile --cwd /path/to/project
+/Users/franck/.agents/bin/ace query --cwd /path/to/project "question"
+/Users/franck/.agents/bin/ace scan-md --cwd /path/to/project --dry-run
 ```
 
-> `scan_md.py` requires being run from the user's project repo (or with
-> `--path /repo`). When invoked through `uv run --directory _config`, set
-> `CLAUDE_PROJECT_DIR=$(pwd)` so the script knows the original cwd
-> (`uv run --directory` changes cwd to `_config` before exec).
+Use `ace init` to explicitly register a project.
+Do not treat a vault directory name as an implicit authorization.
+Do not use a `Conversations` fallback directory.
 
 ## Architecture
 
-### Data Flow
-
-```
-Session start  →  hooks/session-start.py  →  reads knowledge/index.md + recent daily log
-                                           →  returns additionalContext JSON to Claude Code
-
-Conversation ends  →  hooks/session-end.py   →  reads JSONL transcript
-                   →  hooks/pre-compact.py   →  safety net before auto-compaction
-                                              →  spawns flush.py as detached background process
-
-[Async] flush.py  →  Claude Haiku extracts what's worth saving
-                  →  appends to daily/YYYY-MM-DD.md
-                  →  triggers compile.py automatically if past 6 PM
-
-[Async] compile.py  →  Claude Sonnet reads daily log
-                    →  writes/updates concept and connection articles
-                    →  updates knowledge/index.md and knowledge/log.md
-
-[Manual] git repo .md files  →  scan_md.py (Haiku summarises each file)
-                              →  appends `### MD Scan: <path>` sections to today's daily log
-                              →  compile.py picks them up next run
-
-[Automatic] Codex turn-ended notify  →  /Users/franck/.agents/bin/codex-turn-ended
-                                    →  /Users/franck/.agents/bin/codex-cmc-backfill
-                                    →  backfill_codex.py --compile after idle delay
+```text
+Claude, Codex, or Hermes source
+    -> metadata discovery and explicit project opt-in
+    -> read-only adapter, normalization, and filtering
+    -> private SQLite outbox
+    -> Supabase stdin: amastuces profile, ace schema
+    -> database-acquitted revision
+         |-> memory branch: Luna extraction -> daily/YYYY-MM-DD.md
+         |                  -> daily compilation -> knowledge/
+         `-> improvement branch: evidence analysis -> reports
 ```
 
-### Key Design Decisions
+The pipeline keeps a strict boundary between source, transport, and processing.
+The collector selects the project before reading the bounded source body,
+normalizes and filters it, and places it in the outbox.
+The processor processes only snapshots acquitted by Supabase.
+A failure leaves records in the outbox for retry.
 
-**No vector database.** At personal scale (50–500 articles), the LLM reads the full index and selects relevant articles. This outperforms cosine similarity because the model understands intent, not just word overlap.
+### Filtering
 
-**Opt-in per project.** A project gets knowledge capture only when its vault folder already exists (created via `cmc-init` skill). Projects without a folder are silently skipped. Detection: `git rev-parse --show-toplevel` → maps to `Claude_code/<project>/`.
+`scripts/ace_transcripts.py` produces one JSON envelope for Claude, Codex, and
+Hermes.
+The filter masks sensitive fields and token candidates.
+It replaces bytes, images, and encoded data with references.
+It removes `analysis`, `thinking`, `reasoning`, and equivalent blocks.
+It keeps visible messages and useful tool references.
+It retains non-sensitive metadata and `token_usage` needed for coverage and
+diagnostics.
 
-**Hooks never block.** `flush.py` is spawned as a fully detached subprocess (Unix: `start_new_session=True`, Windows: `CREATE_NEW_PROCESS_GROUP`). Context is passed via temp file, cleaned up after. No pipe deadlocks.
+The revision is calculated after this cleanup.
+Secrets and media therefore do not enter message or report copies.
 
-**Recursion prevention.** `CLAUDE_INVOKED_BY=memory_flush` is set before any imports in hooks. Any hook that detects this env var exits immediately — prevents infinite loops when flush.py calls the Agent SDK, which would fire hooks again.
+### Supabase
 
-**Incremental compilation.** SHA-256 hashes of daily logs are stored in `scripts/state.json`. Only files with changed hashes are recompiled.
+`scripts/ace_database.py` calls only the wrapper
+`/Users/franck/.agents/bin/supabase`.
+The profile is `amastuces` and the schema is `ace`.
+Queries go through stdin, including SQL payloads larger than 2 MB.
+The wrapper resolves credentials; the runtime never reads them.
 
-**Codex capture.** Codex does not expose Claude-style hooks, so capture uses
-Codex `notify` in `/Users/franck/.codex/config.toml`. Computer Use may keep
-its own notify command in front and pass the CMC wrapper through
-`--previous-notify`; this is expected and was verified with a dummy payload.
-The previous notify points to `/Users/franck/.agents/bin/codex-turn-ended`,
-which launches a detached delayed backfill worker. The worker skips active
-rollouts, deduplicates by session hash, skips contexts above 120k characters
-by default, marks failed sessions, and compiles affected CMC projects when
-entries are written. Large historical sessions should be backfilled manually
-with explicit limits. Rollback config backup:
-`/Users/franck/.codex/backups/config.toml.pre-cmc-codex-notify-20260601`.
+The database separates ingestion, processing, and read roles.
+It stores filtered snapshots, processing stages, and improvement tracking.
+Compiled versions are readable in the database, but the local vault remains master.
 
-**Tiered models for cost control.**
-- Flush (lightweight extraction): `claude-haiku-4-5` (~$0.02–0.05 per session)
-- Compile/Query (complex reasoning, large context): `claude-sonnet-4-6` (~$0.45–0.65 per compile)
-- Override via env: `CMC_FLUSH_MODEL`, `CMC_COMPILE_MODEL`, `CMC_QUERY_MODEL`
+### Project and vault
 
-**Deduplication.** `scripts/last-flush.json` tracks session IDs + timestamps; duplicate flushes within 60 seconds are skipped.
+The vault registry binds each project to its Git root and UUID.
+A project without explicit registration remains outside collection.
+The 2026-09-07 measurement found four enabled and initialized projects:
+`.agents`, `_config`, `hermes-agents`, and `jiang`. This is a dated measure,
+not a permanent coverage guarantee.
+The latest validation passed 220 runtime tests and 5 Agent Central tests.
 
-### Knowledge Storage Layout
-
-```
-daily/              Append-only source logs (immutable, one file per day)
-knowledge/
-  index.md          Master catalog (table of all articles + one-line summaries)
-  log.md            Build log (timestamped compilations, costs)
-  concepts/         Atomic knowledge articles
-  connections/      Cross-cutting insights linking 2+ concepts
-  qa/               Filed query answers
-scripts/
-  state.json        SHA hashes + compile timestamps + cost tracking (gitignored)
-  last-flush.json   Session deduplication state (gitignored)
-```
-
-### Hook Configuration
-
-Hooks live in `.claude/settings.json` and fire automatically in Claude Code. Three hooks:
-- `SessionStart` → `hooks/session-start.py` (timeout 15s)
-- `PreCompact` → `hooks/pre-compact.py` (timeout 10s)
-- `PostToolUse/Stop` → `hooks/session-end.py` (timeout 10s)
-
-### Article Format
-
-Concept and connection articles use YAML frontmatter:
-```yaml
----
-title: "Article Title"
-type: concept           # or connection, qa
-tags: [tag1, tag2]
-related: [[other-article]]
-updated: 2026-04-29
----
+```text
+<vault>/<project>/
+├── daily/
+└── knowledge/
+    ├── concepts/
+    ├── connections/
+    ├── qa/
+    ├── index.md
+    └── log.md
 ```
 
-Wikilinks (`[[article-name]]`) are first-class — `utils.py` parses them for link validation in `lint.py`.
+`daily/` contains approved extractions.
+`knowledge/` contains compiled articles.
+`AGENTS.md` defines formats, provenance, and merge policy.
 
-## Dependencies
+## Model contract and improvement
 
-- Python 3.12+
-- `uv` (package manager)
-- `claude-agent-sdk>=0.1.29` — LLM calls in compile/flush/query
-- `python-dotenv`, `tzdata`
+Model-backed stages call `gpt-5.6-luna` with fixed `medium` reasoning.
+Deterministic stages can run without a model.
+Astra orchestrates substantial work and verifies the results.
 
-`ANTHROPIC_API_KEY` must be set in environment or `.env`.
+There is no recursive LLM path and no empty-model invocation.
+The strict acknowledgement marker gates processing. Retries use source hashes
+and daily state, and coverage records retain timestamps and project scope.
+
+`scripts/ace_learning.py` builds evidence windows linked to messages.
+It distinguishes expectations, preferences, refusals, frustrations, tool errors,
+overengineering, false completion, and observable outcomes.
+
+Reports retain:
+
+- evidence and limitations;
+- incidents and causes;
+- proposed recommendations;
+- refusals and decisions;
+- explicit corrections;
+- acceptance, application, and effectiveness states.
+
+A recommendation never changes a rule or skill automatically.
+Silence and absence of an incident do not prove resolution.
+An incomplete conversation cannot become `success`.
+
+## Native scheduling
+
+`scripts/ace_schedule.py` describes the Mac `launchd` service.
+The service calls `ace tick` every 1,800 seconds.
+The tick owns the processor lock and persistent catch-up state.
+The active plist is `/Users/franck/Library/LaunchAgents/com.agentcentral.ace.plist`
+with mode `600`; the current launch reports `runs=1` and PID `54145`.
+The lock was observed held, and a concurrent attempt was rejected by `fcntl`.
+
+Daily compilation and analysis start at 07:00 Europe/Paris.
+The report targets 08:00 for the previous day.
+An asleep or powered-off Mac can delay the report.
+There is no Codex heartbeat.
+The first native cycle is still running and has not returned an exit code.
+The 07:00 to 08:00 target remains best-effort when the Mac is awake.
+
+Use `ace schedule plan --json` to inspect the plan.
+Use `ace schedule status --json` to inspect installation without changing it.
+
+## Limits and verified state
+
+The additive migration contains 14 tables under `ace`, with RLS enabled on all
+14 at the 2026-09-07 measurement. That measurement counted 10 sessions, 10
+revisions, 1,905 messages, and the four opt-in projects listed above.
+A private latest backup preceded migration application:
+`/Users/franck/.agents/private/ace/backups/20260907T152703561667Z.json`
+(21,848,234 bytes, SHA-256
+`3366ebcc0723d2df1f4d6b22826d20e744739ce12b7805bfeda6fb24e4ba6ecc`). Forty-five
+states were migrated while original copies were retained.
+The same DB measure counted 6 observations, 12 recommendations, including 3
+verified real frustration recommendations, and 9 snapshots pending processing.
+An observed 2026-08-31 daily produced five articles; resumed `ace compile`
+returned `OK`, and a new-process `ace query` returned a response with a verified
+source. The v3 publication and read-only copy were checked: 6 articles, 8 files,
+6 valid index links, and a deterministic index. The complete E2E flow remains
+unfinished.
+The corrected learning report covers 10 sessions and preserves 18 attempts:
+4 are `OK`, 6 model errors remain to retry, and `A` was validated by replaying
+real JSON without a new model call. The four `OK` reports are distinct from the
+single current ACK and the 9 pending-processing snapshots, which are the
+pre-first-run state. Two outbox entries are currently visible as `pending` while
+the first cycle runs.
+Native lot-1 conversation/context analysis preserves evidence; later passages
+remain under retry, the normalizer and history are corrected, and collection is
+unchanged. Final compile/analysis independence and retry fairness are delivered.
+The canonical quality report is readable at
+`private/ace/reports/8d9ed0fc-8485-51ed-9c0f-10826b15acbb/analysis/latest-daily.md`
+for 10 sources with 4 `OK` and 6 model errors; the operational daily report
+represents only valid loaded audits.
+These observations do not prove exhaustive collection or a successful final
+report.
+
+Historical CMC traces remain available for old-state reading.
+They are not active routes and must not be used as aliases.
+
+## Local documentation
+
+- [Index](docs/INDEX.md)
+- [Runtime ACE contract](docs/ace.md)
+- [Documentation changelog](docs/CHANGELOG.md)
+- [Article schema and merge policy](AGENTS.md)

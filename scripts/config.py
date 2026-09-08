@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -32,13 +33,134 @@ ROOT_DIR = TOOL_DIR  # back-compat alias for any leftover reference
 
 
 # ── Project resolution ────────────────────────────────────────────────
+@dataclass(frozen=True)
+class ProjectRoute:
+    """Stable source/destination identity for a captured conversation."""
+
+    source_project: str | None
+    source_cwd: str
+    destination_project: str | None
+    destination_dir: Path | None
+    used_fallback: bool = False
+    reason: str = ""
+
+
+def _valid_project_name(value: str | None) -> bool:
+    """Accept dot-prefixed project names (notably ``.agents``) safely."""
+    if not value or value in {".", ".."}:
+        return False
+    # Project names originate from a basename. Reject separators so an
+    # explicit env value cannot escape the vault root.
+    return Path(value).name == value and "/" not in value and "\\" not in value
+
+
+def canonical_git_root(start: str | Path) -> Path | None:
+    """Return the main checkout root for a normal checkout or git worktree."""
+    start_path = Path(start).expanduser()
+    try:
+        toplevel_res = subprocess.run(
+            ["git", "-C", str(start_path), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2,
+        )
+        common_res = subprocess.run(
+            ["git", "-C", str(start_path), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if toplevel_res.returncode != 0:
+        return None
+
+    toplevel = Path(toplevel_res.stdout.strip()).resolve()
+    if common_res.returncode == 0:
+        common_dir = Path(common_res.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (start_path / common_dir).resolve()
+        # A linked worktree reports its own top-level but shares the main
+        # checkout's .git directory. Use the main checkout for identity.
+        if common_dir.name == ".git" and common_dir.parent != toplevel:
+            toplevel = common_dir.parent
+    return toplevel
+
+
+def canonical_project_name(cwd: str | Path | None) -> str | None:
+    """Return the shared project identity for a source checkout."""
+    if not cwd:
+        return None
+    root = canonical_git_root(cwd)
+    if root is None:
+        return None
+    name = root.name
+    return name if _valid_project_name(name) else None
+
+
+def initialized_project_dir(
+    vault_root: str | Path,
+    project_name: str | None,
+    *,
+    require_knowledge: bool = True,
+) -> Path | None:
+    """Resolve a vault project using one shared initialization contract."""
+    if not _valid_project_name(project_name):
+        return None
+    candidate = Path(vault_root) / str(project_name)
+    if not candidate.is_dir():
+        return None
+    if require_knowledge and not (candidate / "knowledge").is_dir():
+        return None
+    return candidate
+
+
+def resolve_project_route(
+    source_cwd: str | Path | None,
+    *,
+    fallback_project: str | None = None,
+    vault_root: str | Path = VAULT_ROOT,
+    target_project: str | None = None,
+) -> ProjectRoute:
+    """Map source identity to an initialized destination without fallback routing."""
+    source_cwd_text = str(source_cwd or "")
+    source_project = canonical_project_name(source_cwd)
+
+    if target_project:
+        destination = initialized_project_dir(vault_root, target_project)
+        return ProjectRoute(
+            source_project=source_project,
+            source_cwd=source_cwd_text,
+            destination_project=destination.name if destination else None,
+            destination_dir=destination,
+            used_fallback=False,
+            reason="forced_target" if destination else "forced_target_missing",
+        )
+
+    if source_project:
+        destination = initialized_project_dir(vault_root, source_project)
+        if destination is not None:
+            return ProjectRoute(
+                source_project=source_project,
+                source_cwd=source_cwd_text,
+                destination_project=destination.name,
+                destination_dir=destination,
+                used_fallback=False,
+                reason="source_project",
+            )
+
+    return ProjectRoute(
+        source_project=source_project,
+        source_cwd=source_cwd_text,
+        destination_project=None,
+        destination_dir=None,
+        used_fallback=False,
+        reason="no_initialized_destination",
+    )
+
+
 def resolve_project_dir() -> Path | None:
     """Return the per-project folder inside the vault, or None.
 
     Cascade:
-    0. If $CMC_PROJECT_DIR or $CMC_PROJECT is set, use that vault project
-       directly. This is for maintenance/backfill jobs that are not running
-       from a matching git checkout, such as the shared `Conversations` vault.
+    0. If $ACE_PROJECT_DIR or $ACE_PROJECT is set, use that initialized vault
+       project directly for an explicit maintenance or target operation.
     1. Read $CLAUDE_PROJECT_DIR (set by Claude Code when launching hooks).
        Fallback to os.getcwd() for manual `uv run python …` invocations.
     2. Resolve the canonical project root.
@@ -48,64 +170,40 @@ def resolve_project_dir() -> Path | None:
          `--git-common-dir` to find the main `.git/` and take its parent.
        Both cases unify to "the directory whose name is the project name in
        the vault".
-    3. Project name = basename of canonical root. Reject names that start
-       with "." or are empty (defensive).
+    3. Project name = basename of canonical root. Dot-prefixed names such as
+       `.agents` are valid; only path traversal names are rejected.
     """
-    explicit_dir = os.environ.get("CMC_PROJECT_DIR")
+    explicit_dir = os.environ.get("ACE_PROJECT_DIR")
     if explicit_dir:
         candidate = Path(explicit_dir).expanduser().resolve()
         return candidate if candidate.is_dir() else None
 
-    explicit_project = os.environ.get("CMC_PROJECT")
+    explicit_project = os.environ.get("ACE_PROJECT")
     if explicit_project:
-        candidate = VAULT_ROOT / explicit_project
-        return candidate if candidate.is_dir() else None
+        return initialized_project_dir(VAULT_ROOT, explicit_project)
 
     start = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    try:
-        toplevel_res = subprocess.run(
-            ["git", "-C", start, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=2,
-        )
-        common_res = subprocess.run(
-            ["git", "-C", start, "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=2,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    toplevel = canonical_git_root(start)
+    if toplevel is None:
         return None
-    if toplevel_res.returncode != 0:
-        return None
-
-    toplevel = Path(toplevel_res.stdout.strip())
-
-    # Worktree detection: --git-common-dir points to the MAIN .git/ even from
-    # inside a worktree. If common_dir != toplevel/.git, we're in a worktree
-    # and the canonical project root is the parent of the common dir.
-    if common_res.returncode == 0:
-        common_dir = Path(common_res.stdout.strip())
-        if not common_dir.is_absolute():
-            common_dir = (Path(start) / common_dir).resolve()
-        if common_dir.name == ".git" and common_dir.parent != toplevel:
-            toplevel = common_dir.parent
-
     project_name = toplevel.name
-    if not project_name or project_name.startswith("."):
+    if not _valid_project_name(project_name):
         return None
 
     # Opt-in: only consider this an active KB project if the folder exists in
-    # the vault. Users explicitly enable a project by running the cmc-init
+    # the vault. Users explicitly enable a project by running the ace-init
     # skill (which creates the folder structure). Without that, hooks skip
     # silently — preventing accidental capture in random git repos.
-    candidate = VAULT_ROOT / project_name
-    if not candidate.is_dir():
+    candidate = initialized_project_dir(VAULT_ROOT, project_name)
+    if candidate is None:
         # Make silent failures visible: when we ARE in a git repo but the
         # project is not vaulted, write a single line to stderr so debug
         # logs show why hooks no-op. Claude Code surfaces hook stderr in
         # debug mode without blocking the session.
-        if os.environ.get("CMC_DEBUG_RESOLUTION"):
+        if os.environ.get("ACE_DEBUG_RESOLUTION"):
             print(
-                f"[cmc] PROJECT_DIR=None: '{project_name}' not in vault "
-                f"({VAULT_ROOT}). Run /cmc-init to enable.",
+                f"[ace] PROJECT_DIR=None: '{project_name}' not in vault "
+                f"({VAULT_ROOT}). Run /ace-init to enable.",
                 file=__import__("sys").stderr,
             )
         return None
@@ -145,25 +243,18 @@ else:
 
 
 # ── Model selection ───────────────────────────────────────────────────
-# Cheap models for the right job. Override via env vars if needed.
-# Note: explicit model IDs bypass any global $ANTHROPIC_DEFAULT_*_MODEL
-# aliasing the user may have set in ~/.claude/settings.json.
-#
-# Defaults verified live against the Claude Agent SDK on 2026-04-27.
-# Latest available per tier: Haiku 4.5, Sonnet 4.6, Opus 4.7. Versions
-# are NOT synchronized across tiers — there is no Haiku 4.7 or 4.6, and
-# no Opus 4.6.
-# The daily log is a lossy bottleneck: whatever the extractor drops at this
-# stage is gone for good. compile.py and query.py operate on the daily log,
-# not the original source, so they cannot recover lost nuance. Both
-# extractors (flush, scan_md) therefore default to Sonnet to preserve the
-# rationale, gotchas, and abandoned paths that lower-tier models tend to
-# strip. Haiku is still available via env var for cost-bounded use cases
-# (massive sessions, repos with hundreds of low-density .md files).
-FLUSH_MODEL = os.environ.get("CMC_FLUSH_MODEL", "claude-sonnet-4-6")
-SCAN_MODEL = os.environ.get("CMC_SCAN_MODEL", "claude-sonnet-4-6")
-COMPILE_MODEL = os.environ.get("CMC_COMPILE_MODEL", "claude-sonnet-4-6")
-QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-6")
+# ACE has one execution engine and one model contract.  The Claude hooks are
+# capture-only launchers; every extraction, scan, compile, query, and lint
+# decision is made by this Codex child.  Keep these values fixed so an inherited
+# Claude environment cannot silently switch the processor back to another model.
+CODEX_MODEL = "gpt-5.6-luna"
+CODEX_REASONING_EFFORT = "medium"
+FLUSH_ENGINE = "codex"
+FLUSH_MODEL = CODEX_MODEL
+SCAN_MODEL = CODEX_MODEL
+COMPILE_MODEL = CODEX_MODEL
+QUERY_MODEL = CODEX_MODEL
+CODEX_EXEC_PATH = os.environ.get("ACE_CODEX_EXEC_PATH", "codex")
 
 
 # ── Conversation extraction limits & chunking ────────────────────────
@@ -174,18 +265,18 @@ QUERY_MODEL = os.environ.get("CMC_QUERY_MODEL", "claude-sonnet-4-6")
 # partial summaries into the final daily log entry. No content is dropped
 # regardless of session length.
 #
-# Sonnet 4.6 has a 200K-token context window (~800K chars at 4 chars/token).
-# Per-chunk budget = 120K chars, leaving comfortable headroom for the
+# The Codex child has a bounded context window. Per-chunk budget = 120K chars,
+# leaving comfortable headroom for the
 # prompt itself (~10K), retry buffer, and output (~5K).
 #
 # FLUSH_MAX_CHARS is now a hard safety cap, not the working budget — it
 # only protects against pathological inputs (corrupted transcripts, etc.).
 # Real conversations of any realistic length flow through the chunking
 # pipeline without loss.
-FLUSH_MAX_TURNS = int(os.environ.get("CMC_FLUSH_MAX_TURNS", "10000"))
-FLUSH_MAX_CHARS = int(os.environ.get("CMC_FLUSH_MAX_CHARS", "5000000"))  # 5M — hard safety cap
-FLUSH_SINGLE_PASS_THRESHOLD = int(os.environ.get("CMC_FLUSH_SINGLE_PASS_THRESHOLD", "200000"))
-FLUSH_CHUNK_SIZE = int(os.environ.get("CMC_FLUSH_CHUNK_SIZE", "120000"))
+FLUSH_MAX_TURNS = int(os.environ.get("ACE_FLUSH_MAX_TURNS", "10000"))
+FLUSH_MAX_CHARS = int(os.environ.get("ACE_FLUSH_MAX_CHARS", "5000000"))  # 5M — hard safety cap
+FLUSH_SINGLE_PASS_THRESHOLD = int(os.environ.get("ACE_FLUSH_SINGLE_PASS_THRESHOLD", "200000"))
+FLUSH_CHUNK_SIZE = int(os.environ.get("ACE_FLUSH_CHUNK_SIZE", "120000"))
 
 
 # ── Timezone ──────────────────────────────────────────────────────────

@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import re
 import sys
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, PROJECT_DIR, REPORTS_DIR, now_iso, today_iso
+from config import KNOWLEDGE_DIR, PROJECT_DIR, REPORTS_DIR, VAULT_ROOT, now_iso, today_iso
+from codex_runner import run_codex
 from utils import (
     count_inbound_links,
     extract_wikilinks,
@@ -119,7 +122,9 @@ def check_missing_backlinks() -> list[dict]:
             target_path = KNOWLEDGE_DIR / f"{link}.md"
             if target_path.exists():
                 target_content = target_path.read_text(encoding="utf-8")
-                if f"[[{source_link}]]" not in target_content:
+                if f"/{source_link}.md)" not in target_content \
+                        and f"({source_link}.md)" not in target_content \
+                        and f"[[{source_link}]]" not in target_content:
                     issues.append({
                         "severity": "suggestion",
                         "check": "missing_backlink",
@@ -146,6 +151,21 @@ def check_sparse_articles() -> list[dict]:
     return issues
 
 
+def check_okf_type() -> list[dict]:
+    """OKF v0.1 §9.2: every non-reserved article MUST carry a non-empty `type`."""
+    issues = []
+    for article in list_wiki_articles():
+        content = article.read_text(encoding="utf-8")
+        if not re.search(r"(?m)^type:\s*\S", content):
+            issues.append({
+                "severity": "error",
+                "check": "okf_missing_type",
+                "file": str(article.relative_to(KNOWLEDGE_DIR)),
+                "detail": "OKF non-conformant: missing required `type` frontmatter field",
+            })
+    return issues
+
+
 CONTRADICTION_MAX_ARTICLES = 40
 
 
@@ -156,14 +176,6 @@ async def check_contradictions() -> list[dict]:
     implementation packs the full wiki into one prompt, which becomes
     slow and expensive past that threshold and risks context blow-up.
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
     article_count = len(list_wiki_articles())
     if article_count > CONTRADICTION_MAX_ARTICLES:
         return [{
@@ -201,22 +213,15 @@ If no issues found, output exactly: NO_ISSUES
 
 Do NOT output anything else - no preamble, no explanation, just the formatted lines."""
 
-    response = ""
     try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT_DIR),
-                allowed_tools=[],
-                max_turns=2,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response += block.text
+        response, _stderr = await run_codex(
+            prompt,
+            cwd=VAULT_ROOT,
+            sandbox="read-only",
+            timeout=int(os.environ.get("ACE_LINT_ATTEMPT_TIMEOUT", "300")),
+        )
     except Exception as e:
-        return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"LLM check failed: {e}"}]
+        return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"Codex check failed: {e}"}]
 
     issues = []
     if "NO_ISSUES" not in response:
@@ -286,6 +291,7 @@ def main():
 
     # Structural checks (free, instant)
     checks = [
+        ("OKF type field", check_okf_type),
         ("Broken links", check_broken_links),
         ("Orphan pages", check_orphan_pages),
         ("Orphan sources", check_orphan_sources),

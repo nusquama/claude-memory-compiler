@@ -4,6 +4,254 @@ All notable changes to this project are documented in this file. Format follows 
 
 ## [Unreleased]
 
+### Fixed — 2026-09-08 (ACE morning report and Claude payload unblock, uncommitted)
+
+- Memory first (`DEFAULT_EXTRACTION_MODE = "local"`): `process()` now runs
+  `process_local()` before the database path. The local path reads the
+  sanitized envelopes from `outbox.sqlite3` (`Outbox.snapshots`, read-only, no
+  claim), applies the same session cursor, chunking, extractor and daily
+  writer, and records each snapshot with `path="local"`. The database path
+  only closes the remote stage for locally extracted revisions
+  (`_reconcile_local_extraction`) and never replays or retries a snapshot the
+  local path owns; it still extracts snapshots that exist only remotely.
+  `ACE_EXTRACTION_MODE=database` restores the previous DB-first contract.
+- `ace collect --extract` writes the daily log right after capture; the Claude
+  session hooks pass it (`hooks/ace_capture.py`), restoring the pre-ACE
+  session-end flush without any database or Bitwarden access.
+- `_PLAIN_SECRET_RE` ignores the `<REDACTED>` marker as a value so marker
+  contexts stay accepted by `normalize_envelope`.
+- Tests: `test_end_to_end_collect_process_writes_daily_before_db_ack`,
+  `test_database_mode_keeps_extraction_after_db_ack`,
+  `test_process_local_works_without_any_store`; hook command test expects
+  `--extract`.
+- Add `scripts/ace_morning_report.py` and the `ace report [--day]` subcommand:
+  one model-free Markdown report across every registered project, written to
+  `private/ace/reports/morning/<day>.md` plus `latest.md`. Incidents are sorted
+  by priority then risk; recurrences, successes, preferences, analysed
+  conversations, token usage per stage and limits follow. The native tick
+  writes it after the due daily work (`result["report"]`).
+- Raise `AUTOMATION_MAX_PAYLOAD_BYTES` from 500 000 to 4 000 000 bytes. Every
+  Claude transcript above 500 KB was deferred for 24 hours on each pass and
+  never reached the database (17 rows in `retry`, all with
+  `automatic payload deferred`). Deferred rows were reset to `pending` after a
+  backup under `private/ace/backups/repair-20260908T160648Z/`.
+- Observation: each database call through the Supabase wrapper costs 45 to
+  60 seconds because the Bitwarden secret is resolved per process behind a
+  12-second cross-process gate. Manual batches export the secret once via
+  `agent_export_secret`; the native tick still pays the cost on every call.
+- Align the local redactor with `ace.jsonb_is_clean`: `_PLAIN_SECRET_RE` in
+  `scripts/utils.py` now accepts an optional quote around the credential label
+  (`'token': value`). A 3.2 MB Codex snapshot was rejected by the database with
+  "ACE message is not sanitized" because one tool-call argument contained
+  Python source matching that shape locally unredacted. Its stale `retry` row
+  stays in the outbox until an explicit cleanup; the next collection of that
+  session enqueues a clean revision.
+- Strengthen the analysis prompt in `build_snapshot_prompt`: incidents and
+  recommendations must carry a stable `signature`, a `priority` (high/normal/
+  low by user cost) and a `risk` (low/medium/high by change scope);
+  `cause.summary` starts with one root-cause category among
+  `[regle_absente] [regle_non_suivie] [information_manquante]
+  [information_introuvable] [outil] [inconnue]`; recommendations name the
+  target component and give the exact wording, "Avant/Après" when a text
+  changes; repeated user preferences become `rule` or `memory`
+  recommendations. Generic "reproduce the calls" advice is only allowed when no
+  rule, skill or information can prevent the problem. No schema field added.
+- Validation: `tests/test_ace_pipeline.py` and `tests/test_ace_pipeline_runtime.py`
+  pass (62 tests); `tests/test_ace_morning_report.py` added (4 tests, pass);
+  learning, contract, safety, evidence, ingestion and identity suites pass
+  (75 tests).
+
+### Fixed — 2026-09-08 (ACE audit repairs, uncommitted)
+
+- Add a dedicated `Auto-amélioration` section to the daily report. It exposes
+  detected signals, suggestion references, recorded action states and
+  correction verification without applying suggestions automatically.
+- Preserve the first messages of new incremental Codex sessions and retry failed/deferred reads without advancing their cursor. Baseline sessions predating activation without a history replay. Serialize collection state and hook callback claims; expire and bound the callback ledger.
+- Rotate the durable outbox selection to prevent starvation, correct its configured payload/lot limits, and preserve strict database acknowledgements.
+- Add migration `002_ace_stage_leases.sql`: atomic stage claims, owner/host checks, renewable leases, expiration, stale-worker rejection and source-date windows applied before the database limit. Apply only unapplied numbered migrations, without replaying old grants.
+- Apply migration 002 to `amastuces` after Franck's explicit authorization. Preserve the pre-migration backup at `/Users/franck/.agents/private/ace/backups/20260907T221250928246Z.json` (33,515,982 bytes; SHA-256 `fbb4a17b466fee9711d4e5a8bc855dc9668421ecf360131f240eb1172cf19c73`). Versions 1 and 2 are present; no migration remains pending; RLS remains enabled on all 15 ACE tables.
+- Verify the real database's atomic rollback, idempotence, latest revision selection, project isolation, role permissions, compiled reading and analysis retry/fairness. The transactional verification leaves zero fixture rows.
+- Share the native `tick.lock` with manual process/daily/compile/scan entry points. Start the daily work after 07:00, resume after sleep, bound actual failure retries, and keep successful pending continuations eligible until all current batches finish. Keep explicit `--day` scoped to that local source day and protect the native activation boundary.
+- Pass `scan-md` its explicit verified source root separately from the vault destination. Migrate legacy CMC state to the canonical ACE private state root.
+- Use the canonical query-context helper, rank the whole candidate corpus before the context limit, and keep ordinary knowledge queries free of state writes.
+- Compile in an isolated temporary workspace. Validate index/article/source/build-log relationships before committing, preserve concurrent edits, and keep the prior corpus after a failed stage. Validate knowledge bundles before publication/materialization.
+- Repair the existing `.agents` knowledge links and the build log's inaccurate missing-article reference without rewriting daily sources. Preserve the three originals under `private/ace/backups/repair-20260907T212414Z/knowledge-links/`.
+- Keep the Luna `gpt-5.6-luna` / `medium` contract. Collect measured Codex JSON usage and duration, including retries, and persist extraction/compile/analysis stage metrics. Missing usage remains unknown.
+- Replace the twelve-section summary template with four focused sections; retain user corrections, actor/message references, exact tool results, and verification limits. A synthetic eight-message check produces 16 lines with the scope correction and all decisive values preserved.
+- Reject weak terminal markers, negative/missing event acknowledgements, proofless recurrences and unknown session identities. Persist refusal semantics through the existing decision RPC and suppress refused proposals across sessions.
+- Preserve nested model-report structure and strict evidence validation. Scope rejected attempts to their session/revision. Keep successes, incidents, correction recurrence, and independent accepted/refused/applied/verified/effective metrics tied to evidence; exclude unresolved claims from actions and proven KPIs. Bound recursive report sanitization and redact secret-bearing keys.
+- Validation: 309 runtime tests passed, including three tests against an isolated PostgreSQL instance, plus four Agent Central entry-point tests. The temporary PostgreSQL server was stopped after verification.
+- A real Luna run on an entirely synthetic Codex conversation completed collection, synchronization, extraction, compilation, analysis and sourced knowledge query: `daily={days:1,compiled:1,analyzed:1,failed:0,pending:0}`. This is separate from the production conversation check.
+- Fix the manual daily source-window handoff: fetch actual snapshot messages without an incremental cutoff, unwrap storage envelopes before learning, preserve flat project identities, and retain a safe persistence error reason. The real replay remains scoped to the activation cutoff; final result is recorded below. No automatic skill/rule changes, no historical backfill and no Git publication.
+- Batch the bounded `snapshot_delta` reads for an explicit daily source window into one Supabase wrapper call, avoiding one Bitwarden throttle per conversation while preserving the same evidence and fail-closed validation. The live `.agents` run for `2026-09-07` now returns `analyzed=1, compiled=0, failed=0, pending=0`; the persisted audit is `status=ok` with 9 sessions and no errors. Targeted ACE tests: 108 passed.
+- Source rollback backup: `/Users/franck/.agents/private/ace/backups/repair-20260907T212414Z`. Operator edits predating this repair remain intact.
+
+### Correction du 2026-09-07 : diagnostic des rapports ACE rejetés (non commité)
+
+- Conservation du champ, de l’index du claim et du motif précis de rejet.
+- Références et messages identifiés sans enregistrer le texte brut du modèle.
+- Conservation des diagnostics initiaux et de la reprise unique en échec.
+- Transmission des diagnostics à la reprise, sans assouplir la validation.
+- Les 53 tests du contrat d’analyse et du runtime passent.
+- Rejeu local du seul snapshot acquitté courant : un appel Luna medium, une conversation, statut `ok`, aucune erreur.
+- Aucune règle de preuve assouplie : le rejet précédent ne s’est pas reproduit.
+- Aucun historique relu, aucune écriture Supabase, aucun daily log modifié.
+- Les compteurs natifs `ace daily` ne sont pas validés par ce rejeu isolé.
+
+### Fixed — 2026-09-07 (ACE bounded automation, uncommitted)
+- Restore the CMC-style incremental boundary for the native 30-minute pass:
+  Supabase returns compact revision references, then only the per-session
+  message delta is eligible for extraction.
+- Ignore historical pending revisions whose source update predates the
+  automation cutoff; explicit/manual processing and `--all-history` retain
+  their requested history semantics.
+- Bound automatic extraction to one revision per project per tick and run the
+  daily report/compilation only once during the configured morning window
+  (`ACE_DAILY_REPORT_TARGET`, default `08:00`).
+- Add a Codex JSONL byte cursor: the first automatic observation records only
+  the end position, later observations parse appended records instead of
+  rebuilding a multi-megabyte transcript; oversized automatic outbox retries
+  are deferred for 24 hours without deletion.
+- Fix the automatic Supabase reference query so a one-item processing limit
+  scans past historical pending rows before applying the incremental cutoff;
+  this restores the current conversation to the daily-log path.
+- Fetch the first bounded delta for a session created after the cutoff;
+  existing sessions still baseline without replaying historical content.
+- Validation: 231 tests pass; a live incremental tick scoped to `.agents`
+  returned `process.candidates=1`, `process.processed=1`, and
+  `sync.failed=0`, updating the project daily log. No history backfill was
+  performed; the morning report window was not due.
+
+### Changed — 2026-09-07 (ACE measured integration, uncommitted)
+- Document the two post-acknowledgement branches: memory (`daily/` and
+  `knowledge/`) and evidence-based improvement. The documentation does not
+  claim independent cadences or E2E completion.
+- Keep the canonical `/Users/franck/.agents/bin/ace` entry point, explicit
+  project opt-in, local vault master, and read-only compiled database versions.
+- Correct collection semantics: select the project before reading and filtering
+  the bounded source; process only strict database ACK revisions.
+- Record the stdin SQL transport (including payloads above 2 MB), CLI await and
+  on-notice handling, strict ACK, metadata and token-usage retention, secret,
+  base64 and reasoning guards, hash/daily retries, verified message references,
+  no recursive LLM, no empty model calls, and timestamped project-scoped coverage.
+- Preserve 45 migrated states with original copies, the recoverable CMC archive,
+  and the additive migration backup at
+  `/Users/franck/.agents/private/ace/backups/20260907T141813217439Z.json`
+  (21,802,182 bytes).
+- Measured on 2026-09-07: four opt-in projects, 10 sessions, 10 revisions,
+  1,905 messages, 14 ACE tables, and RLS on all 14. An observed daily dated
+  2026-08-31 produced five articles; resumed `ace compile` returned `OK`, and a
+  new-process `ace query` returned a response with a verified source.
+- The same DB measure counted 6 observations, 12 recommendations, including 3
+  verified real frustration recommendations, and 9 snapshots pending processing.
+- Latest validation passed 220 runtime tests and 5 Agent Central tests.
+- The v3 publication and read-only copy were checked: 6 articles, 8 files, 6
+  valid index links, and a deterministic index.
+- The corrected learning report covers 10 sessions and preserves 18 attempts:
+  4 are `OK`, 6 model errors remain to retry, and `A` was validated by replaying
+real JSON without a new model call. The four `OK` reports are distinct from
+the single current ACK and the 9 pending-processing snapshots.
+- Native lot-1 conversation/context analysis preserves evidence; later passages
+  remain under retry and collection is unchanged. Final compile/analysis
+  independence and retry fairness remain under completion.
+- The normalizer remains under targeted correction; collection is unchanged.
+- The corrected real-report rerun remained in progress and required validation.
+  The native service is not installed. No commit, push, or completed E2E claim.
+
+### Fixed — 2026-09-06 (ACE collection reliability, lot 1, uncommitted)
+- Abort extraction when any map-reduce chunk or consolidation fails. Return
+  `FLUSH_ERROR` rather than validating the full source hash with partial output.
+  Retry the complete source on a later eligible collection attempt.
+- Share project routing across the collector, backfill and runtime config;
+  retain the source project separately from the vault destination.
+- Extend read-only capture coverage to Claude/CCS and Codex while retaining
+  the historical Codex entry point. No scheduler, model, project initialization,
+  transcript migration or historical re-extraction is included.
+- Add synthetic regression tests for partial failure, complete retry,
+  deduplication, project routing and multi-source coverage.
+- Validation: 91 tests pass with `python3 -B -m pytest -q -p no:cacheprovider tests`;
+  scoped diff checks pass. No live transcript re-extraction was performed.
+
+### Added — 2026-09-06 (ACE weekly synthesis)
+- Add `scripts/ace_weekly_report.py`, a deterministic rolling-seven-day
+  Europe/Paris synthesis over existing audit JSON and incident-tracking state.
+- Reuse the daily report's source/session selection and private atomic writer;
+  report recurring exact-label types only after three distinct sessions, keep
+  work/ingestion/audit dates separate, require evidence for successes and
+  explicitly linked counterexamples, and leave correction statuses untouched.
+- Invoke the weekly renderer after the independent daily renderer in the
+  existing Codex worker; a weekly failure does not suppress the daily report.
+- Add synthetic weekly and worker-isolation tests.
+
+### Fixed — 2026-09-05 (ACE pre-mortem)
+- The conditional Codex `turn-ended` path now documents and preserves its
+  360-second delay, 30-minute per-session guard, stable-rollout cooldown, and
+  ten-conversation audit batch without `--force`; no scheduler was added.
+- Collection fairness now rotates new, retry, and older pending candidates and
+  records pending/freshest age and mtime coverage fields.
+- Query retrieval ranks before the Codex call and bounds the index to 12,000
+  characters, each article to 12,000, eight articles, and the combined context
+  to 24,000; fallback relevance is explicitly unverified.
+- Audit completeness is independent from bounded evidence windows, rejects a
+  success claim without current terminal evidence, keeps observable incidents
+  on partial sources, validates same-conversation evidence references, and
+  preserves separate source, ingestion, and audit dates without auto-closing
+  incident workflow fields.
+- Backfill redacts before daily/state writes and keeps state directories/files
+  private. Final runtime validation: 74 `test_cmc*.py` tests passed.
+
+### Changed — 2026-09-05
+- Daily CMC reports now default to the ignored Agent Central private directory
+  `/Users/franck/.agents/private/cmc/daily`; existing `~/.codex/reports/cmc-daily/`
+  reports are preserved.
+
+### Agent improvement cycle — 2026-09-05 (uncommitted)
+- Add bounded Claude/Codex collection with durable hash checkpoints and a compile queue.
+- Preserve tool evidence and distinguish observed outcomes from agent claims.
+- Track structured incidents and successes against changing conversation versions.
+- Add a private synthetic model evaluation harness without changing production models.
+- Propagate query/compile failures; preserve the compiled input hash if a daily log changes.
+- Extend tests for collection recovery, evidence retention, incidents and verified outcomes.
+
+### Fixed
+- The automatic Codex worker now preserves rollout modification times, so a
+  stable copied rollout no longer becomes `SKIP active`.
+- A worker checkpoint reaches `completed` only after a successful write or a
+  terminal skip. Failed attempts remain eligible for retry.
+- Codex subagent rollouts are excluded by default. Use `--include-subagents`
+  only for an intentional historical import.
+- Conversation, Markdown, compile, and query prompts redact common credentials
+  before any model call or new vault write.
+- Codex child diagnostics no longer echo prompts or responses into CMC logs.
+- Repeated Codex system diagnostics are deduplicated within each child run.
+- `backfill_codex.py --limit` now counts actual model calls. Active, subagent,
+  oversized, and already ingested rollouts do not consume the requested limit.
+
+### Added
+- `scripts/cmc_health.py` reports seven-day Codex capture coverage without
+  modifying the vault.
+- `scripts/cmc_secret_audit.py` reports potential credentials in historical
+  vault files without modifying them.
+- `scripts/cmc_overengineering_audit.py` creates a private report after ten
+  newly ingested Codex conversations, or after seven days when unaudited
+  conversations exist. Reports stay outside the CMC vault under
+  `~/.codex/reports/overengineering/`.
+- First activation audits the latest batch and records older ingested sessions
+  as the baseline, so future automatic runs process only new conversations.
+- Frustration metadata from the shared Agent Central detector now triggers an
+  immediate audit. Raw vulgar or private user text is never stored in metrics,
+  and agent fault remains unverified until the report proves a concrete gap.
+- Audit batches are ordered by conversation time instead of ingestion time.
+  Reports must contain every requested conversation and the frustration section;
+  one bounded repair pass runs before an incomplete report can be written.
+- `tests/test_cmc_safety.py` covers credential redaction and subagent detection.
+
+### Changed
+- **CMC is now Codex-only end to end.** `flush.py`, `scan_md.py`, `compile.py`,
+  `query.py`, and semantic `lint.py` all use the fixed `codex exec` runner with
+  `gpt-5.6-luna` and `medium` reasoning. Claude Code hooks remain capture-only
+  launchers; the Claude Agent SDK dependency and fallback path were removed.
+
 ### Added
 - `scripts/scan_md.py` — second ingestion source alongside session transcripts. Scans `.md` files in the current git repo (README, docs/, plans/, design docs, etc.) and appends Sonnet-extracted summaries to today's daily log under `### MD Scan: <path>` sections, identifying the source file. Filters: `--init` (full rescan, clears state), `--days N` (modified in last N days), `--since YYYY-MM-DD`, `--all` (ignore hash dedup), `--path` (override repo root), `--dry-run`. Default behavior re-scans only files whose hash changed since the last scan. State stored under `state.json["scanned_md"]`.
 - New `CMC_SCAN_MODEL` env var (default `claude-sonnet-4-6`).
@@ -16,6 +264,12 @@ All notable changes to this project are documented in this file. Format follows 
 - Documented `scan_md.py` commands and a new data-flow branch in `CLAUDE.md`.
 
 ### Changed
+- **All session flushes now extract through Codex by default.** Claude
+  SessionEnd/PreCompact hooks, Claude transcript backfill, and Codex backfill
+  use an ephemeral, read-only `codex exec` child with `gpt-5.6-luna` and
+  medium reasoning. User config, project rules, and notify recursion are
+  disabled for the child; the Claude Agent SDK remains available only through
+  the explicit `CMC_FLUSH_ENGINE=claude` fallback.
 - **Inversion philosophique flush/compile : `flush` est EXHAUSTIF, `compile` est CURATEUR.** Le flush n'est plus un filtre intelligent ; il devient un extracteur exhaustif. Les anciennes règles "filter the obvious", "skip the routine", "anti-padding" ont été remplacées par : "capture chaque atome distinct, ne filtre que les répétitions littérales et fillers (greetings, chain-of-thought, Read tool calls sans valeur)". Rationale : le flush écrit pour l'agent compile aval (pas pour un humain) — l'agent peut éliminer du signal en trop, mais ne peut pas reconstruire un signal manqué. Une session jiang de 2h51 produit maintenant ~17K chars de daily log (vs ~4K avant truncation, ~6K en mode "filtre intelligent") — tous les IDs, sub-task Asana, valeurs verbatim, citations Thomas, artefacts produits sont préservés pour que `compile.py` ait de la matière à curer.
 - **Format daily log restructuré.** Nouveau format : `Contexte` (1-2 lignes) + `Déroulé` (liste numérotée chronologique, 1 événement causal par ligne avec flèches `→`) + `Décisions prises` (macro et micro) + `Chemins abandonnés` + `Découvertes / gotchas / observations` (toutes les surprises et valeurs vues) + `Entités mentionnées` (verbatim) + `Citations notables` (verbatim utilisateur/tiers) + `Artefacts produits` (avec statut) + `Action items` + `Questions ouvertes`. Le `Déroulé` permet à `compile.py` de reconstruire la séquence et les pivots de la session ; les sections atomiques fournissent les briques queryables. Pas de quota par section : autant d'items que la session a d'atomes distincts.
 - **`compile.py` prompt mis à jour** pour parser la nouvelle structure des daily logs : politique explicite sur comment incorporer Déroulé / Citations / Artefacts / Questions ouvertes dans les concept articles. Indication explicite que `compile` est le curateur du signal exhaustif livré par flush.
