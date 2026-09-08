@@ -20,6 +20,13 @@ All notable changes to this project are documented in this file. Format follows 
   session-end flush without any database or Bitwarden access.
 - `_PLAIN_SECRET_RE` ignores the `<REDACTED>` marker as a value so marker
   contexts stay accepted by `normalize_envelope`.
+- `redact_sensitive_text` ends with `_database_clean_pass`, an exact mirror of
+  the `ace.jsonb_is_clean` string grammar (assignment, CLI flag, provider
+  token, marker stripping) plus NUL removal, with a separator-dropping
+  fallback when the mirrored check still fails. A message accepted locally is
+  therefore never rejected by the database ("ACE message is not sanitized",
+  "unsupported Unicode escape sequence"). Eight historical rows were
+  re-sanitized in place and ingested.
 - Analysis salvage: `_normalise_model_report` no longer discards a whole
   conversation report because one claim cites a proof outside the supplied
   evidence windows. Claims whose proof resolves are kept, the discarded count

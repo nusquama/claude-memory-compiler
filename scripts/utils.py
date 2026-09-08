@@ -90,7 +90,33 @@ def _database_clean_pass(content: str) -> str:
 
     content = _DB_ASSIGN_RE.sub(keep_marker, content)
     content = _DB_FLAG_RE.sub(keep_marker, content)
-    return _DB_TOKEN_RE.sub(r"\1<REDACTED>", content)
+    content = _DB_TOKEN_RE.sub(r"\1<REDACTED>", content)
+    # The database strips each ``name=<REDACTED>`` pair together with the
+    # character that follows it, so two adjacent pairs can leave a bare
+    # ``name =`` that still matches. When the mirrored check still fails,
+    # drop the separator after the label: no assignment, nothing to leak.
+    if not _database_string_is_clean(content):
+        content = _DB_LABEL_SEPARATOR_RE.sub(r"\1 ", content)
+    return content
+
+
+_DB_LABEL_SEPARATOR_RE = re.compile(
+    rf"(?i)([\"']?(?:{_SECRET_NAME})[\"']?)\s*[:=]\s*"
+)
+_DB_PROBE_STRIP_FLAG_RE = re.compile(
+    rf"(?i)(^|[^A-Za-z0-9_])--(?:{_SECRET_NAME})\s+(?:<REDACTED>|'<REDACTED>'|\"<REDACTED>\")([^A-Za-z0-9_]|$)"
+)
+_DB_PROBE_STRIP_MARKER_RE = re.compile(r"(?i)(<REDACTED>|'<REDACTED>'|\"<REDACTED>\")")
+
+
+def _database_string_is_clean(content: str) -> bool:
+    """Mirror ``ace.jsonb_is_clean`` for one string, marker stripping included."""
+    probe = _DB_MARKER_PAIR_RE.sub(r"\1\2", content)
+    probe = _DB_PROBE_STRIP_FLAG_RE.sub(r"\1\2", probe)
+    probe = _DB_PROBE_STRIP_MARKER_RE.sub("", probe)
+    if _PRIVATE_KEY_RE.search(probe) or re.search(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----", probe):
+        return False
+    return not (_DB_ASSIGN_RE.search(probe) or _DB_FLAG_RE.search(probe) or _DB_TOKEN_RE.search(probe))
 
 
 def redact_sensitive_text(content: str) -> str:
