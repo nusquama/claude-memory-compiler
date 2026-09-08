@@ -1070,3 +1070,35 @@ def test_collect_dry_run_queues_nothing_and_lists_candidates(tmp_path):
     assert outbox.items == []
     assert transcripts.parse_calls == 0
     assert runner.state.read("collection") == {}
+
+
+def test_extraction_splits_signals_from_the_daily_body(tmp_path):
+    source = tmp_path / "source.jsonl"
+    source.write_text("**User:** putain ça marche pas", encoding="utf-8")
+    output = (
+        "**Problème original**\n- la capture échoue\n\n"
+        '<<<ACE_SIGNAUX>>>\n{"signals": ['
+        '{"type": "frustration", "signature": "capture en echec", "message_ids": ["m1"],'
+        ' "quote": "putain ça marche pas", "observed": "la capture a échoué"},'
+        '{"type": "inconnu", "quote": "x"}]}'
+    )
+    runner, project, _projects, _transcripts, _outbox = make_pipeline(
+        tmp_path, store=None, extractor=lambda context: output
+    )
+    runner.collect([source], cwd=project.root, source="test", host_id="host-a")
+    result = runner.process(project=project)
+    assert result["processed"] == 1
+    assert result["signals"] == 1
+
+    daily = next((project.vault_dir / "daily").glob("*.md")).read_text(encoding="utf-8")
+    assert "la capture échoue" in daily
+    assert "ACE_SIGNAUX" not in daily
+    assert "signals" not in daily
+
+    written = list((runner.private_root / "signals").rglob("*.jsonl"))
+    assert len(written) == 1
+    rows = [json.loads(line) for line in written[0].read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["type"] == "frustration"
+    assert rows[0]["quote"] == "putain ça marche pas"
+    assert rows[0]["signature"] == "capture en echec"

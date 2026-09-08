@@ -78,6 +78,23 @@ EXTRACTION_CURSOR_VERSION = 1
 # the central database is synchronized and acknowledged asynchronously.
 # "database": the historical contract, extraction only after the DB ack.
 DEFAULT_EXTRACTION_MODE = "local"
+# Marker the extractor appends after the daily body, followed by one JSON
+# object holding the improvement signals it observed in the raw transcript.
+SIGNAL_MARKER = "<<<ACE_SIGNAUX>>>"
+SIGNAL_TYPES = frozenset(
+    {
+        "frustration",
+        "correction_utilisateur",
+        "demande_repetee",
+        "tool_error",
+        "fausse_completion",
+        "perte_de_contexte",
+        "preference_recurrente",
+    }
+)
+MAX_SIGNALS_PER_SNAPSHOT = 40
+MAX_SIGNAL_QUOTE_CHARS = 200
+MAX_SIGNAL_TEXT_CHARS = 400
 PARIS = ZoneInfo("Europe/Paris")
 STAGES = ("collection", "sync", "extraction", "compile", "analysis")
 # Structural validation messages from ``compile.validate_knowledge_bundle``.
@@ -406,6 +423,108 @@ class _LocalOutbox:
             "acked": sum(item["status"] == "acked" for item in self.items),
             "total": len(self.items),
         }
+
+
+def _first_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object in ``text``, string-aware."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _normalise_signal(value: Any) -> dict[str, Any] | None:
+    """Keep one bounded improvement signal, or nothing.
+
+    The extractor sees the raw transcript, so it is the only stage able to
+    quote the user verbatim.  Everything here is bounded and typed; an unknown
+    type or a missing quote/message pair is dropped rather than guessed.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    kind = str(value.get("type") or "").strip().lower()
+    if kind not in SIGNAL_TYPES:
+        return None
+    message_ids = [
+        str(item).strip()
+        for item in (value.get("message_ids") or [])
+        if isinstance(item, (str, int)) and str(item).strip()
+    ][:20]
+    quote = _redact(" ".join(str(value.get("quote") or "").split()))[:MAX_SIGNAL_QUOTE_CHARS]
+    observed = _redact(" ".join(str(value.get("observed") or "").split()))[:MAX_SIGNAL_TEXT_CHARS]
+    signature = _redact(" ".join(str(value.get("signature") or kind).split()))[:120]
+    if not message_ids and not quote:
+        # A signal with neither a message nor a quote cannot be verified later.
+        return None
+    return {
+        "type": kind,
+        "signature": signature or kind,
+        "message_ids": message_ids,
+        "quote": quote,
+        "observed": observed,
+    }
+
+
+def split_extraction_signals(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Split the daily body from the appended SIGNAUX blocks.
+
+    Several extractor outputs may be concatenated, so every marker occurrence
+    is parsed and its signals merged.  A malformed block is ignored: the daily
+    log must never be lost because the signal JSON was wrong.
+    """
+    if not text or SIGNAL_MARKER not in text:
+        return text, []
+    segments = text.split(SIGNAL_MARKER)
+    body_parts = [segments[0]]
+    signals: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for segment in segments[1:]:
+        payload = _first_json_object(segment)
+        if payload is not None:
+            try:
+                parsed = json.loads(payload)
+            except ValueError:
+                parsed = None
+            items = parsed.get("signals") if isinstance(parsed, Mapping) else None
+            for item in items or []:
+                signal = _normalise_signal(item)
+                if signal is None:
+                    continue
+                identity = (signal["type"], signal["signature"], signal["quote"])
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                signals.append(signal)
+                if len(signals) >= MAX_SIGNALS_PER_SNAPSHOT:
+                    break
+            # Anything after the JSON object belongs to the next daily chunk.
+            remainder = segment[segment.find(payload) + len(payload) :]
+        else:
+            remainder = segment
+        if remainder.strip():
+            body_parts.append(remainder)
+    return "\n\n".join(part.strip() for part in body_parts if part.strip()), signals
 
 
 class ACEPipeline:
@@ -3336,6 +3455,7 @@ class ACEPipeline:
             )
             for key in ("candidates", "processed", "empty", "baseline", "failed", "pending"):
                 counts[key] += int(local_counts.get(key, 0) or 0)
+            counts["signals"] = int(local_counts.get("signals", 0) or 0)
             counts["local"] = local_counts
         store = self._get_store()
         if store is None:
@@ -3573,9 +3693,12 @@ class ACEPipeline:
                     )
                     counts["empty"] += 1
                     continue
-                extracted = "\n\n".join(outputs)
+                extracted, signals = split_extraction_signals("\n\n".join(outputs))
                 renew_extraction_claim()
                 daily = self._daily_write(project, item, extracted, context=context)
+                counts["signals"] = counts.get("signals", 0) + self._record_signals(
+                    project, item, signals, daily.stem
+                )
                 renew_extraction_claim()
                 if not self._mark_stage(
                     store,
@@ -3628,6 +3751,44 @@ class ACEPipeline:
             self.state.write("extraction", extraction_state)
         self.state.write("extraction", extraction_state)
         return counts
+
+    def _record_signals(
+        self, project: Any, item: Any, signals: Sequence[Mapping[str, Any]], day: str
+    ) -> int:
+        """Append improvement signals observed during extraction, append-only.
+
+        The extractor is the only stage holding the raw transcript, so it is
+        the only one that can quote the user verbatim.  Storing the signals
+        here lets the morning analysis skip conversations with no signal at
+        all, and lets the report show the exact wording the daily log
+        deliberately neutralises.
+        """
+        if not signals:
+            return 0
+        identity = self._snapshot_identity(item)
+        project_id = _project_id(project) if project is not None else identity["project_id"]
+        directory = self.private_root / "signals" / (project_id or "unknown")
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = directory / f"{day}.jsonl"
+        recorded = 0
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                for signal in signals:
+                    row = {
+                        "recorded_at": self.now().isoformat(),
+                        "project_id": project_id,
+                        "source": identity.get("source", ""),
+                        "session_id": identity.get("session_id", ""),
+                        "revision": identity.get("revision", ""),
+                        **{key: signal.get(key) for key in ("type", "signature", "message_ids", "quote", "observed")},
+                    }
+                    handle.write(json.dumps(_json_safe(row), ensure_ascii=False, sort_keys=True) + "\n")
+                    recorded += 1
+            with contextlib.suppress(OSError):
+                path.chmod(0o600)
+        except OSError:
+            return 0
+        return recorded
 
     @staticmethod
     def _extraction_mode() -> str:
@@ -3786,7 +3947,10 @@ class ACEPipeline:
                     )
                     counts["empty"] += 1
                 else:
-                    daily = self._daily_write(project, item, "\n\n".join(outputs), context=context)
+                    body, signals = split_extraction_signals("\n\n".join(outputs))
+                    daily = self._daily_write(project, item, body, context=context)
+                    recorded = self._record_signals(project, item, signals, daily.stem)
+                    counts["signals"] = counts.get("signals", 0) + recorded
                     if next_cursor is not None:
                         cursors[cursor_key] = next_cursor
                     records[state_key] = self._extraction_state_record(
@@ -3798,6 +3962,7 @@ class ACEPipeline:
                         daily_file=daily.name,
                         processed_at=self.now().isoformat(),
                         path="local",
+                        signals=recorded,
                     )
                     counts["processed"] += 1
             except Exception as error:

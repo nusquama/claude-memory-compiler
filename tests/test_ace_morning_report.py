@@ -143,7 +143,7 @@ def test_health_section_reports_pipeline_errors(private_root: Path) -> None:
     _write(private_root / "extraction.json", {"snapshots": {"x": {"status": "pending", "error_type": "PipelineError"}}})
     _write(private_root / "analysis.json", {"projects": {"p1": {"days": {"2026-09-08": {"status": "pending", "reason": "stage_failed"}}}}})
     content = morning.build_report(private_root, "2026-09-08")
-    assert "## 8. Santé de ACE" in content
+    assert "## 9. Santé de ACE" in content
     assert "1 conversation(s) en état `retry` (SupabaseStoreError)" in content
     assert "Collecte alpha : 2 échec(s) de lecture" in content
     assert "EmptyTranscriptError=1" in content
@@ -179,3 +179,29 @@ def test_health_section_surfaces_the_compiler_reason(private_root: Path) -> None
     content = morning.build_report(private_root, "2026-09-08")
     assert "Compilation alpha le 2026-09-08 : `failed` PipelineError." in content
     assert "Motif : incomplete knowledge build; broken internal link: concepts/gtm-x" in content
+
+
+def test_capture_signals_are_rendered_with_verbatim_quote(private_root: Path) -> None:
+    path = private_root / "signals" / "p1" / "2026-09-08.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"type": "frustration", "signature": "tache declaree terminee", "message_ids": ["m1"],
+         "quote": "putain ça marche toujours pas", "observed": "l'agent a déclaré la tâche finie"},
+        {"type": "frustration", "signature": "tache declaree terminee", "message_ids": ["m2"],
+         "quote": "encore la même chose", "observed": "même annonce sans preuve"},
+        {"type": "tool_error", "signature": "lecture impossible", "message_ids": ["m3"],
+         "quote": "", "observed": "appel Bash en erreur"},
+    ]
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    content = morning.build_report(private_root, "2026-09-08")
+    assert "## 2. Signaux captés à la capture" in content
+    assert "| frustration | tache declaree terminee | alpha | 2 |" in content
+    assert "| tool_error | lecture impossible | alpha | 1 |" in content
+    assert "putain ça marche toujours pas" in content
+    assert "Avant cela : l'agent a déclaré la tâche finie" in content
+
+
+def test_report_without_signals_says_so(private_root: Path) -> None:
+    content = morning.build_report(private_root, "2026-09-08")
+    assert "## 2. Signaux captés à la capture" in content
+    assert "Aucun signal capté" in content

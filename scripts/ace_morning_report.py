@@ -113,6 +113,68 @@ def _tokens(stage_metrics: Any) -> dict[str, dict[str, int]]:
     return result
 
 
+def _signals_for(private_root: Path, project_id: str, day: str) -> list[dict[str, Any]]:
+    """Read the signals the extractor observed in the raw transcript."""
+    path = private_root / "signals" / project_id / f"{day}.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, Mapping) and row.get("type"):
+                rows.append(dict(row))
+    except OSError:
+        return []
+    return rows
+
+
+def _render_signals(signals: list[dict[str, Any]]) -> list[str]:
+    """Render the raw capture signals, verbatim quote included.
+
+    The daily log deliberately neutralises tone; these rows keep the user's
+    exact wording, which is the primary evidence of a friction.
+    """
+    lines = [
+        "## 2. Signaux captés à la capture",
+        "",
+        "Relevés pendant la lecture du transcript, avant toute reformulation. La citation est verbatim.",
+        "",
+    ]
+    if not signals:
+        lines.extend(["Aucun signal capté. Les conversations du jour sont antérieures à cette capture, ou sans signal.", ""])
+        return lines
+    counts: dict[tuple[str, str], int] = {}
+    for row in signals:
+        key = (str(row.get("type")), str(row.get("signature")))
+        counts[key] = counts.get(key, 0) + 1
+    lines.extend(["| Type | Signature | Projet | Occurrences |", "|---|---|---|---:|"])
+    seen: set[tuple[str, str]] = set()
+    for row in signals:
+        key = (str(row.get("type")), str(row.get("signature")))
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"| {key[0]} | {_clip(key[1], 60)} | {row.get('_project', '-')} | {counts[key]} |")
+    lines.extend(["", "Extraits :", ""])
+    for row in signals[:12]:
+        quote = _clip(row.get("quote"), 180)
+        if not quote:
+            continue
+        observed = _clip(row.get("observed"), 160)
+        lines.append(f"- **{row.get('type')}** « {quote} »")
+        if observed:
+            lines.append(f"    Avant cela : {observed}")
+    lines.append("")
+    return lines
+
+
 def _ace_health(private_root: Path, day: str, names: Mapping[str, str]) -> list[str]:
     """Report the pipeline's own errors from local state only. No model, no DB."""
     lines: list[str] = []
@@ -248,7 +310,7 @@ def _ace_health(private_root: Path, day: str, names: Mapping[str, str]) -> list[
         except (OSError, ValueError, IndexError):
             lines.append("- Dernier tick natif : journal illisible.")
 
-    header = ["## 8. Santé de ACE", ""]
+    header = ["## 9. Santé de ACE", ""]
     if problems == 0:
         return header + ["Aucune erreur de la chaîne détectée dans l'état local.", *lines, ""]
     return header + [f"{problems} point(s) à regarder.", "", *lines, ""]
@@ -261,12 +323,16 @@ def build_report(private_root: Path, day: str) -> str:
     successes: list[dict[str, Any]] = []
     preferences: list[dict[str, Any]] = []
     conversations: list[dict[str, Any]] = []
+    signals: list[dict[str, Any]] = []
     tokens: dict[str, dict[str, dict[str, int]]] = {}
     coverage: dict[str, dict[str, Any]] = {}
     limits: list[str] = []
 
     for project_id in sorted(names, key=lambda item: names[item]):
         name = names[project_id]
+        for row in _signals_for(private_root, project_id, day):
+            row["_project"] = name
+            signals.append(row)
         analysis, origin = _analysis_for(private_root, project_id, day)
         audit = _audit_for(private_root, project_id, day)
         if analysis is None and audit is None:
@@ -358,7 +424,8 @@ def build_report(private_root: Path, day: str) -> str:
                 "",
             ]
         )
-    lines.extend(["## 2. Récurrences", ""])
+    lines.extend(_render_signals(signals))
+    lines.extend(["## 3. Récurrences", ""])
     if not recurrences:
         lines.append("Aucune récurrence : un même problème n'est pas revenu dans plusieurs sessions.")
     else:
@@ -368,19 +435,19 @@ def build_report(private_root: Path, day: str) -> str:
                 f"| {item.get('signature')} | {item['_project']} | {item.get('occurrences') or 0} | {item.get('session_count') or 0} |"
             )
         lines.extend(["", "Le regroupement porte sur la signature exacte. Deux libellés différents restent deux lignes."])
-    lines.extend(["", "## 3. Ce qui marche", ""])
+    lines.extend(["", "## 4. Ce qui marche", ""])
     if not successes:
         lines.append("Aucun succès prouvé par une preuve explicite dans cette fenêtre.")
     for item in successes:
         text = item.get("summary") or item.get("text") or item.get("observed") or item
         lines.append(f"- {item['_project']} : {_clip(text)}")
-    lines.extend(["", "## 4. À capitaliser", ""])
+    lines.extend(["", "## 5. À capitaliser", ""])
     if not preferences:
         lines.append("Aucune préférence récurrente détectée dans cette fenêtre.")
     for item in preferences:
         text = item.get("text") or item.get("summary") or item.get("preference") or item
         lines.append(f"- {item['_project']} : {_clip(text)}")
-    lines.extend(["", "## 5. Conversations analysées", ""])
+    lines.extend(["", "## 6. Conversations analysées", ""])
     if not conversations:
         lines.append("Aucune conversation décrite dans les audits du jour.")
     else:
@@ -389,7 +456,7 @@ def build_report(private_root: Path, day: str) -> str:
             lines.append(
                 f"| {item['_project']} | {_clip(item.get('subject'), 80)} | {item.get('status') or '-'} | {_clip(item.get('summary'), 160)} |"
             )
-    lines.extend(["", "## 6. Consommation", ""])
+    lines.extend(["", "## 7. Consommation", ""])
     if not tokens:
         lines.append("Aucune mesure de tokens disponible. Une mesure absente n'est pas zéro.")
     else:
@@ -405,7 +472,7 @@ def build_report(private_root: Path, day: str) -> str:
         lines.append(
             f"| **Total** | | | {total['input_tokens']} | {total['cached_input_tokens']} | {total['output_tokens']} |"
         )
-    lines.extend(["", "## 7. Limites", ""])
+    lines.extend(["", "## 8. Limites", ""])
     lines.append("- Le rapport lit les analyses existantes. Il ne relance aucune analyse.")
     lines.append("- Un projet sans rapport daté n'a pas été analysé ce jour, ou son analyse a échoué.")
     for item in limits:

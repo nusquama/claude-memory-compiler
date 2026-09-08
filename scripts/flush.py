@@ -372,6 +372,42 @@ distincts utiles, sans quota qui en supprimerait. Garde les marqueurs de
 certitude `[Établi]`, `[Décidé]`, `[Hypothèse]` et `[Découvert] si pertinents.
 Ne résume jamais le contenu privé du raisonnement interne du modèle."""
 
+_SIGNALS_BLOCK = """## Bloc SIGNAUX (obligatoire, après le daily log)
+
+Tu as le transcript brut sous les yeux. C'est le seul moment où le ton exact
+est disponible: le daily log ci-dessus reformule en langage neutre et perd ce
+ton. Produis donc, après le daily log, un bloc de signaux destiné au rapport
+d'amélioration de l'agent.
+
+Sépare-le par une ligne contenant exactement `<<<ACE_SIGNAUX>>>`, puis un seul
+objet JSON valide, sans texte autour, de la forme:
+
+{"signals": [{"type": "...", "signature": "...", "message_ids": ["..."],
+"quote": "...", "observed": "..."}]}
+
+- `type` vaut exactement l'une de ces valeurs: `frustration`,
+  `correction_utilisateur`, `demande_repetee`, `tool_error`,
+  `fausse_completion`, `perte_de_contexte`, `preference_recurrente`.
+- `signature` est un libellé court et stable du problème, réutilisable d'une
+  session à l'autre. Exemple: `mauvais profil Chrome`,
+  `tache declaree terminee sans verification`.
+- `message_ids` contient les identifiants réels des messages concernés, tels
+  qu'ils apparaissent dans le transcript. N'invente aucun identifiant.
+- `quote` est une citation VERBATIM et courte du passage déclencheur, 200
+  caractères au maximum. Conserve les mots exacts de l'utilisateur, y compris
+  la vulgarité: c'est le signal, pas un défaut à corriger.
+- `observed` décrit en une phrase factuelle ce que l'agent a fait ou omis
+  juste avant.
+
+Règles:
+- N'émets un signal que si le transcript le montre. Aucun signal supposé.
+- Une frustration ou une profanité est un signal d'échange, jamais un
+  diagnostic psychologique ni une attribution de faute.
+- Ne propose ici aucune correction et aucune cause: le diagnostic est fait
+  plus tard, avec les preuves complètes de la conversation.
+- Si la session ne porte aucun signal, écris `{"signals": []}`.
+- Le bloc SIGNAUX ne remplace jamais le daily log et ne le résume pas."""
+
 _LANG_RULE = """## Langue
 
 La sortie finale doit être écrite en français. Garde les termes techniques,
@@ -393,6 +429,8 @@ N'utilise AUCUN outil. Réponds en texte brut uniquement.
 {_CAPTURE_RULES}
 
 {_OUTPUT_FORMAT}
+
+{_SIGNALS_BLOCK}
 
 ## Mode silence
 
@@ -426,6 +464,11 @@ N'utilise AUCUN outil. Réponds en texte brut uniquement.
 {_CAPTURE_RULES}
 
 {_OUTPUT_FORMAT}
+
+{_SIGNALS_BLOCK}
+
+Pour cette partie, n'émets que les signaux visibles dans CETTE partie. La
+consolidation fusionnera les blocs de toutes les parties.
 
 ## Mode silence partiel
 
@@ -503,6 +546,12 @@ N'utilise AUCUN outil. Réponds en texte brut uniquement.
     fichiers à tous les fichiers. Garde les limites et les cas non vérifiés.
 
 {_OUTPUT_FORMAT}
+
+{_SIGNALS_BLOCK}
+
+Fusionne les blocs SIGNAUX des parties: garde chaque signal distinct une seule
+fois, conserve ses `message_ids` et sa citation verbatim d'origine. N'invente
+aucun signal absent des parties.
 
 ## Mode silence consolidé
 

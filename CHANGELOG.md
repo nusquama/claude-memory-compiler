@@ -27,6 +27,18 @@ All notable changes to this project are documented in this file. Format follows 
   therefore never rejected by the database ("ACE message is not sanitized",
   "unsupported Unicode escape sequence"). Eight historical rows were
   re-sanitized in place and ingested.
+- Improvement signals are now produced by the extraction stage, while it holds
+  the raw transcript. `flush.py` appends a bounded `<<<ACE_SIGNAUX>>>` JSON
+  block after the daily body (single-pass, partial and consolidation prompts);
+  `split_extraction_signals` separates it, validates each row against a closed
+  type list, and `_record_signals` appends it to
+  `private/ace/signals/<project_id>/<day>.jsonl`. The daily log is never lost
+  when the block is malformed. Rationale: the daily prompt rewrites the
+  conversation in neutral language, so the user's verbatim wording — the
+  primary evidence of a friction — only exists at extraction time. Measured:
+  the current daily carries 425 message references but zero raw user words.
+  The morning report gained section 2 « Signaux captés à la capture », with
+  the verbatim quote and a per-signature counter; later sections renumbered.
 - `_safe_compile_diagnostic` keeps the compiler's structural validation
   reasons verbatim (broken internal link, article missing from index, index
   link has no file, …). They carry knowledge-base slugs only, never transcript
