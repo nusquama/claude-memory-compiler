@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import subprocess
@@ -364,6 +365,61 @@ def normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _resanitise_stored_envelope(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Re-apply the current transport sanitiser to a stored envelope.
+
+    The sanitiser evolves. An envelope written under an older revision can
+    stop matching the current rule, and the transport guard then rejects it.
+    Re-cleaning keeps the guard's protection, since the stricter rule is the
+    one applied, while preventing one historical row from failing an entire
+    batch read and, through it, the whole cycle.
+    """
+    try:
+        from ace_transcripts import _AttachmentCollector, _clean_content
+    except Exception:
+        return None
+    repaired = dict(envelope)
+    messages = repaired.get("messages")
+    if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
+        return None
+    rebuilt: list[Any] = []
+    changed = False
+    for message in messages:
+        if not isinstance(message, Mapping):
+            rebuilt.append(message)
+            continue
+        candidate = dict(message)
+        for field in ("content", "text", "body"):
+            value = candidate.get(field)
+            if value is None:
+                continue
+            try:
+                cleaned = _clean_content(
+                    value, collector=_AttachmentCollector("<ace-transport>"), source_line=0
+                )
+            except Exception:
+                return None
+            if cleaned != value:
+                candidate[field] = cleaned
+                changed = True
+        rebuilt.append(candidate)
+    if not changed:
+        return None
+    repaired["messages"] = rebuilt
+    return repaired
+
+
+def normalise_stored_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalise an envelope read back from storage, repairing it if needed."""
+    try:
+        return normalize_envelope(envelope)
+    except EnvelopeValidationError:
+        repaired = _resanitise_stored_envelope(envelope)
+        if repaired is None:
+            raise
+        return normalize_envelope(repaired)
+
+
 def _sql_text(value: str) -> str:
     """Return a SQL string literal; the SQL itself is sent only on stdin."""
 
@@ -534,7 +590,12 @@ class SupabaseStore:
             if not isinstance(envelope, Mapping):
                 # A mocked or older function may return the envelope directly.
                 envelope = row
-            pending.append(normalize_envelope(envelope))
+            try:
+                pending.append(normalise_stored_envelope(envelope))
+            except EnvelopeValidationError as error:
+                # One unusable historical row must not hide every other
+                # snapshot, nor fail the whole cycle.
+                logging.warning("skipping unusable snapshot: %s", type(error).__name__)
         return pending
 
     def pending_snapshot_refs(
@@ -602,7 +663,7 @@ class SupabaseStore:
         envelope = row.get("envelope", row.get("snapshot"))
         if not isinstance(envelope, Mapping):
             envelope = row
-        return normalize_envelope(envelope)
+        return normalise_stored_envelope(envelope)
 
     def snapshot_deltas(self, requests: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Read several bounded message deltas through one wrapper process.
@@ -647,7 +708,10 @@ class SupabaseStore:
             envelope = row.get("envelope", row.get("snapshot"))
             if not isinstance(envelope, Mapping):
                 envelope = row
-            output.append(normalize_envelope(envelope))
+            try:
+                output.append(normalise_stored_envelope(envelope))
+            except EnvelopeValidationError as error:
+                logging.warning("skipping unusable snapshot delta: %s", type(error).__name__)
         return output
 
     def claim_stage(
@@ -1040,4 +1104,5 @@ __all__ = [
     "SupabaseStore",
     "SupabaseStoreError",
     "normalize_envelope",
+    "normalise_stored_envelope",
 ]

@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. Format follows 
 
 ## [Unreleased]
 
+### Fixed — 2026-09-09 (stored envelopes survive a sanitiser change)
+
+- Regression from 2026-09-08: tightening `redact_sensitive_text` made the
+  transport guard reject conversations captured under the previous rule, since
+  it compares stored content with the current sanitiser's output. One 2.2 MB
+  Codex conversation therefore raised `EnvelopeValidationError`, and because
+  the batch reads validated every row eagerly, that single row failed the whole
+  `tick`. Between 07:00 and 11:15 no collection, no analysis and no morning
+  report ran.
+- `normalise_stored_envelope` now re-applies the current sanitiser to a stored
+  envelope before rejecting it. The stricter rule is the one enforced, so the
+  guard keeps its protection, and a rule change no longer turns stored
+  conversations into dead rows.
+- `pending_snapshots` and `snapshot_deltas` skip a row that stays unusable
+  instead of failing the entire read; the reason is logged without content.
+  One historical row can no longer stop the cycle.
+- Recovery: the eight queued envelopes were re-sanitised in place (two fields
+  in the Codex conversation), then the cycle was replayed for 2026-09-09.
+- Tests: `test_stored_envelope_is_repaired_instead_of_rejected`,
+  `test_unrepairable_stored_envelope_still_raises`; 331 runtime tests pass.
+
 ### Fixed — 2026-09-08 (ACE morning report and Claude payload unblock, uncommitted)
 
 - Memory first (`DEFAULT_EXTRACTION_MODE = "local"`): `process()` now runs

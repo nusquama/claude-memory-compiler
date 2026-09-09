@@ -18,6 +18,7 @@ from ace_database import (  # noqa: E402
     SupabaseStore,
     SupabaseStoreError,
     normalize_envelope,
+    normalise_stored_envelope,
 )
 from ace_transcripts import _AttachmentCollector, _clean_content  # noqa: E402
 
@@ -492,3 +493,21 @@ def test_migration_is_additive_and_has_default_deny_controls() -> None:
     ).read_text().lower()
     assert "drop table" not in lowered
     assert "drop schema" not in lowered
+
+
+def test_stored_envelope_is_repaired_instead_of_rejected() -> None:
+    """A rule change must not turn a stored conversation into a dead row."""
+    candidate = envelope()
+    candidate["messages"][0]["content"] = "token: hunter2"
+    with pytest.raises(EnvelopeValidationError):
+        normalize_envelope(candidate)
+    repaired = normalise_stored_envelope(candidate)
+    assert "hunter2" not in json.dumps(repaired, ensure_ascii=False)
+    assert "<REDACTED>" in json.dumps(repaired, ensure_ascii=False)
+
+
+def test_unrepairable_stored_envelope_still_raises() -> None:
+    candidate = envelope()
+    candidate["messages"] = "not a list"
+    with pytest.raises(EnvelopeValidationError):
+        normalise_stored_envelope(candidate)
