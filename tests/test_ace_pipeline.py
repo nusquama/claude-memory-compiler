@@ -1119,9 +1119,15 @@ def test_capture_signals_are_passed_to_the_daily_analysis(tmp_path):
     (directory / "2026-09-08.jsonl").write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8"
     )
+    # A conversation started yesterday writes its signals into yesterday's
+    # file; the analysis must still receive them for the session it examines.
+    (directory / "2026-09-07.jsonl").write_text(
+        json.dumps({"session_id": "s-3", "type": "demande_repetee", "signature": "sig-c"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     loaded = runner._capture_signals_for(project, "2026-09-08")
-    assert set(loaded) == {"s-1", "s-2"}
+    assert set(loaded) == {"s-1", "s-2", "s-3"}
     assert len(loaded["s-1"]) == 1
     assert loaded["s-1"][0]["quote"] == "putain"
     assert loaded["s-2"][0]["type"] == "tool_error"
-    assert runner._capture_signals_for(project, "2026-09-07") == {}
+    assert loaded["s-3"][0]["signature"] == "sig-c"

@@ -205,3 +205,34 @@ def test_report_without_signals_says_so(private_root: Path) -> None:
     content = morning.build_report(private_root, "2026-09-08")
     assert "## 2. Signaux captés à la capture" in content
     assert "Aucun signal capté" in content
+
+
+def test_signals_are_selected_by_capture_day_not_file_name(private_root: Path) -> None:
+    """A conversation from an earlier day must still surface today's signal."""
+    path = private_root / "signals" / "p1" / "2026-08-02.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"recorded_at": "2026-09-09T09:00:00+02:00", "type": "frustration",
+         "signature": "sync bloquee", "quote": "pourquoi c'est bloqué", "observed": "annonce sans preuve"},
+        {"recorded_at": "2026-09-08T09:00:00+02:00", "type": "frustration",
+         "signature": "hier", "quote": "hier", "observed": "hier"},
+    ]
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    content = morning.build_report(private_root, "2026-09-09")
+    assert "sync bloquee" in content
+    assert "| frustration | hier |" not in content
+
+
+def test_agent_signals_come_before_tool_errors(private_root: Path) -> None:
+    path = private_root / "signals" / "p1" / "2026-09-08.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"type": "tool_error", "signature": "outil casse", "quote": "erreur"},
+        {"type": "frustration", "signature": "agent en cause", "quote": "ça marche pas", "observed": "annonce"},
+    ]
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    content = morning.build_report(private_root, "2026-09-08")
+    assert "### Sur l'agent (1)" in content
+    assert "### Sur les outils (1)" in content
+    assert content.index("agent en cause") < content.index("outil casse")
+    assert "Ce que tu as dit, mot pour mot" in content

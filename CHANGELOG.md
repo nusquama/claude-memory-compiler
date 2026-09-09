@@ -13,6 +13,19 @@ All notable changes to this project are documented in this file. Format follows 
   the batch reads validated every row eagerly, that single row failed the whole
   `tick`. Between 07:00 and 11:15 no collection, no analysis and no morning
   report ran.
+- Signals are now selected by the day ACE captured them (`recorded_at`), not by
+  the signal file's name. A file is named after the conversation's own day, so
+  every signal captured today from a conversation started earlier was invisible
+  to both the report and the analysis: the whole capture mechanism looked empty
+  the day after it shipped. `_capture_signals_for` reads every file of the
+  project and keys on the session, so the analysis receives what was seen for
+  the exact conversation it examines.
+- Report section 2 is split: « Sur l'agent » first (frustration, correction,
+  repeated request, false completion, context loss, recurring preference) with
+  the verbatim quotes, then « Sur les outils ». The purpose is improving the
+  agent, so tool failures can no longer bury the exchange signals. Measured on
+  2026-09-09: 42 agent signals, of which 10 frustrations and 14 user
+  corrections, previously all hidden.
 - Every `tick` stage is isolated: collect, and per project sync, process and
   daily now run through `run_stage`, which records `{stage, project,
   error_type}` in `result["stage_errors"]` and continues instead of cancelling

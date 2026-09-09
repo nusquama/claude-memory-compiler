@@ -34,6 +34,27 @@ DEFAULT_PRIVATE_ROOT = Path(
 _PRIORITY_ORDER = {"high": 0, "élevée": 0, "elevee": 0, "normal": 1, "medium": 1, "moyenne": 1, "low": 2, "faible": 2}
 _RISK_ORDER = {"low": 0, "faible": 0, "medium": 1, "moyen": 1, "high": 2, "élevé": 2, "eleve": 2}
 _MAX_TEXT = 320
+# Signals about the exchange itself, the ones that improve the agent. Tool
+# failures are kept but never allowed to bury them.
+_AGENT_SIGNAL_TYPES = frozenset(
+    {
+        "frustration",
+        "correction_utilisateur",
+        "demande_repetee",
+        "fausse_completion",
+        "perte_de_contexte",
+        "preference_recurrente",
+    }
+)
+_SIGNAL_ORDER = {
+    "frustration": 0,
+    "correction_utilisateur": 1,
+    "demande_repetee": 2,
+    "fausse_completion": 3,
+    "perte_de_contexte": 4,
+    "preference_recurrente": 5,
+    "tool_error": 6,
+}
 
 
 def _clip(value: Any, limit: int = _MAX_TEXT) -> str:
@@ -114,13 +135,24 @@ def _tokens(stage_metrics: Any) -> dict[str, dict[str, int]]:
 
 
 def _signals_for(private_root: Path, project_id: str, day: str) -> list[dict[str, Any]]:
-    """Read the signals the extractor observed in the raw transcript."""
-    path = private_root / "signals" / project_id / f"{day}.jsonl"
-    if not path.exists():
+    """Read the signals the extractor observed in the raw transcript.
+
+    Signal files are named after the conversation's own day, which is often an
+    earlier date than the day the extraction ran. Selecting by file name alone
+    silently hid every signal captured today from a conversation started
+    yesterday. Select on ``recorded_at`` instead: the day ACE saw the signal is
+    the day the report must show it.
+    """
+    directory = private_root / "signals" / project_id
+    if not directory.is_dir():
         return []
     rows: list[dict[str, Any]] = []
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+    for path in sorted(directory.glob("*.jsonl")):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in content.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -128,10 +160,19 @@ def _signals_for(private_root: Path, project_id: str, day: str) -> list[dict[str
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, Mapping) and row.get("type"):
-                rows.append(dict(row))
-    except OSError:
-        return []
+            if not isinstance(row, Mapping) or not row.get("type"):
+                continue
+            recorded = str(row.get("recorded_at") or "")
+            if recorded:
+                try:
+                    seen = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+                except ValueError:
+                    seen = None
+                if seen is not None and seen.astimezone(PARIS).date().isoformat() != day:
+                    continue
+            elif path.stem != day:
+                continue
+            rows.append(dict(row))
     return rows
 
 
@@ -154,23 +195,42 @@ def _render_signals(signals: list[dict[str, Any]]) -> list[str]:
     for row in signals:
         key = (str(row.get("type")), str(row.get("signature")))
         counts[key] = counts.get(key, 0) + 1
-    lines.extend(["| Type | Signature | Projet | Occurrences |", "|---|---|---|---:|"])
-    seen: set[tuple[str, str]] = set()
-    for row in signals:
-        key = (str(row.get("type")), str(row.get("signature")))
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.append(f"| {key[0]} | {_clip(key[1], 60)} | {row.get('_project', '-')} | {counts[key]} |")
-    lines.extend(["", "Extraits :", ""])
-    for row in signals[:12]:
-        quote = _clip(row.get("quote"), 180)
-        if not quote:
-            continue
-        observed = _clip(row.get("observed"), 160)
-        lines.append(f"- **{row.get('type')}** « {quote} »")
-        if observed:
-            lines.append(f"    Avant cela : {observed}")
+    # The goal is to improve the agent, not to list tool failures. Signals
+    # about the exchange itself come first; tool errors are grouped last.
+    agent_rows = [row for row in signals if str(row.get("type")) in _AGENT_SIGNAL_TYPES]
+    tool_rows = [row for row in signals if str(row.get("type")) not in _AGENT_SIGNAL_TYPES]
+
+    def table(rows: list[dict[str, Any]]) -> list[str]:
+        out = ["| Type | Signature | Projet | Occurrences |", "|---|---|---|---:|"]
+        seen: set[tuple[str, str]] = set()
+        for row in sorted(rows, key=lambda item: _SIGNAL_ORDER.get(str(item.get("type")), 9)):
+            key = (str(row.get("type")), str(row.get("signature")))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(f"| {key[0]} | {_clip(key[1], 60)} | {row.get('_project', '-')} | {counts[key]} |")
+        return out
+
+    lines.append(f"### Sur l'agent ({len(agent_rows)})")
+    lines.append("")
+    if agent_rows:
+        lines.extend(table(agent_rows))
+        lines.extend(["", "Ce que tu as dit, mot pour mot :", ""])
+        for row in sorted(agent_rows, key=lambda item: _SIGNAL_ORDER.get(str(item.get("type")), 9))[:12]:
+            quote = _clip(row.get("quote"), 180)
+            if not quote:
+                continue
+            observed = _clip(row.get("observed"), 160)
+            lines.append(f"- **{row.get('type')}** « {quote} »")
+            if observed:
+                lines.append(f"    Avant cela : {observed}")
+    else:
+        lines.append("Aucun signal sur l'échange lui-même.")
+    lines.extend(["", f"### Sur les outils ({len(tool_rows)})", ""])
+    if tool_rows:
+        lines.extend(table(tool_rows))
+    else:
+        lines.append("Aucune erreur d'outil captée.")
     lines.append("")
     return lines
 

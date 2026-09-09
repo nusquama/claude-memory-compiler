@@ -3813,12 +3813,20 @@ class ACEPipeline:
         windows alone.
         """
         project_id = _project_id(project) if project is not None else ""
-        path = self.private_root / "signals" / (project_id or "unknown") / f"{day}.jsonl"
-        if not path.exists():
+        directory = self.private_root / "signals" / (project_id or "unknown")
+        if not directory.is_dir():
             return {}
+        # A signal file is named after the conversation's own day, which is
+        # often earlier than the extraction day. Read every file and key on the
+        # session: the analysis must receive what was seen for the exact
+        # conversation it examines, whatever date the file carries.
         grouped: dict[str, list[dict[str, Any]]] = {}
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
+        for path in sorted(directory.glob("*.jsonl")):
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in content.splitlines():
                 line = line.strip()
                 if not line:
                     continue
@@ -3839,8 +3847,6 @@ class ACEPipeline:
                 bucket = grouped.setdefault(session_id, [])
                 if entry not in bucket:
                     bucket.append(entry)
-        except OSError:
-            return {}
         return grouped
 
     @staticmethod
