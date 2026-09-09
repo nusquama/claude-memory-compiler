@@ -13,6 +13,13 @@ All notable changes to this project are documented in this file. Format follows 
   the batch reads validated every row eagerly, that single row failed the whole
   `tick`. Between 07:00 and 11:15 no collection, no analysis and no morning
   report ran.
+- Every `tick` stage is isolated: collect, and per project sync, process and
+  daily now run through `run_stage`, which records `{stage, project,
+  error_type}` in `result["stage_errors"]` and continues instead of cancelling
+  the cycle. `PipelineBusyError` still propagates, since it means another
+  worker holds the lock. Root cause of three days of outages: any exception in
+  one stage, for one project, silently stopped collection, analysis and the
+  morning report for every project.
 - `normalise_stored_envelope` now re-applies the current sanitiser to a stored
   envelope before rejecting it. The stricter rule is the one enforced, so the
   guard keeps its protection, and a rule change no longer turns stored

@@ -22,6 +22,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import logging
 import os
 import re
 import socket
@@ -5523,13 +5524,39 @@ class ACEPipeline:
                 # the due daily work for each project. Never resolve the
                 # service's working directory as an implicit project.
                 projects: list[Any] = self._processable_projects()
-                result["collect"] = self.collect(
-                    (),
-                    source=source,
-                    limit=max(limit, AUTOMATION_COLLECT_LIMIT),
-                    all_history=all_history,
-                    sync=False,
-                )
+                # Every stage is isolated below. One failing project, or one
+                # failing stage, must never cancel the whole cycle: that is how
+                # a single unusable conversation silently stopped collection,
+                # analysis and the morning report for hours.
+                stage_errors: list[dict[str, str]] = []
+
+                def run_stage(name: str, project_name: str, call: Callable[[], Any]) -> Any:
+                    try:
+                        return call()
+                    except PipelineBusyError:
+                        raise
+                    except Exception as error:  # noqa: BLE001 - reported, never raised
+                        stage_errors.append(
+                            {
+                                "stage": name,
+                                "project": project_name,
+                                "error_type": type(error).__name__,
+                            }
+                        )
+                        logging.warning("ace tick stage failed: %s/%s %s", project_name, name, type(error).__name__)
+                        return None
+
+                result["collect"] = run_stage(
+                    "collect",
+                    "all",
+                    lambda: self.collect(
+                        (),
+                        source=source,
+                        limit=max(limit, AUTOMATION_COLLECT_LIMIT),
+                        all_history=all_history,
+                        sync=False,
+                    ),
+                ) or {"candidates": 0, "queued": 0, "failed": 0, "offline": False}
                 result["projects"] = len(projects)
                 result["sync"] = {"synced": 0, "failed": 0, "offline": False}
                 result["process"] = {"candidates": 0, "processed": 0, "empty": 0, "baseline": 0, "failed": 0, "pending": 0, "offline": False}
@@ -5537,25 +5564,38 @@ class ACEPipeline:
                 local_now = (now or self.now()).astimezone(PARIS)
                 daily_due = automation_since is None or self._automation_daily_due(local_now)
                 for project in projects:
-                    sync_result = self.sync(
-                        project=project,
-                        limit=max(1, effective_limit * 4),
-                        created_after=automation_since,
-                    )
+                    project_name = _project_name(project) or "unknown"
+                    sync_result = run_stage(
+                        "sync",
+                        project_name,
+                        lambda project=project: self.sync(
+                            project=project,
+                            limit=max(1, effective_limit * 4),
+                            created_after=automation_since,
+                        ),
+                    ) or {"synced": 0, "failed": 1, "offline": False}
                     for key in ("synced", "failed"):
                         result["sync"][key] += int(sync_result.get(key, 0) or 0)
                     result["sync"]["offline"] = result["sync"]["offline"] or bool(sync_result.get("offline"))
-                    process_result = self.process(
-                        project=project,
-                        limit=effective_limit,
-                        minimum_started_at=automation_since,
-                        _lock_held=True,
-                    )
+                    process_result = run_stage(
+                        "process",
+                        project_name,
+                        lambda project=project: self.process(
+                            project=project,
+                            limit=effective_limit,
+                            minimum_started_at=automation_since,
+                            _lock_held=True,
+                        ),
+                    ) or {"candidates": 0, "processed": 0, "empty": 0, "baseline": 0, "failed": 1, "pending": 0, "offline": False}
                     for key in ("candidates", "processed", "empty", "baseline", "failed", "pending"):
                         result["process"][key] += int(process_result.get(key, 0) or 0)
                     result["process"]["offline"] = result["process"]["offline"] or bool(process_result.get("offline"))
                     if daily_due:
-                        daily_result = self.daily(project=project, now=local_now, _lock_held=True)
+                        daily_result = run_stage(
+                            "daily",
+                            project_name,
+                            lambda project=project: self.daily(project=project, now=local_now, _lock_held=True),
+                        ) or {"days": 0, "compiled": 0, "analyzed": 0, "failed": 1, "pending": 0}
                         # A day with more conversations than one analysis batch
                         # reports ``pending``; continue a few times in the same
                         # tick instead of waiting 30 minutes per batch.
@@ -5567,7 +5607,11 @@ class ACEPipeline:
                             and attempts < DAILY_CONTINUATIONS_PER_TICK
                         ):
                             attempts += 1
-                            daily_result = self.daily(project=project, now=local_now, _lock_held=True)
+                            daily_result = run_stage(
+                                "daily",
+                                project_name,
+                                lambda project=project: self.daily(project=project, now=local_now, _lock_held=True),
+                            ) or {"days": 0, "compiled": 0, "analyzed": 0, "failed": 1, "pending": 0}
                         result["daily"]["projects"] += 1
                         for key in ("days", "compiled", "analyzed", "failed", "pending"):
                             result["daily"][key] += int(daily_result.get(key, 0) or 0)
@@ -5580,6 +5624,8 @@ class ACEPipeline:
                     # One readable report across every project, written after
                     # the per-project analyses. It never calls a model.
                     result["report"] = self.morning_report(day=local_now.date().isoformat())
+                if stage_errors:
+                    result["stage_errors"] = stage_errors[:20]
                 return result
             project = self._resolve_project(cwd)
             result["sync"] = self.sync(
